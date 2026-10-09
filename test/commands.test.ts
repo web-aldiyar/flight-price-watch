@@ -146,8 +146,8 @@ describe('Conversation', () => {
     await say(MENU.list);
     expect(messenger.last?.text).toContain('Алматы → Стамбул, декабрь 2026, в одну сторону');
     expect(messenger.last?.text).toContain('сейчас 50\u00a0000 ₸');
-    const [del] = messenger.buttons;
-    expect(del).toMatch(/^del:\d+$/);
+    expect(messenger.buttons).toEqual([expect.stringMatching(/^edit:\d+$/), expect.stringMatching(/^del:\d+$/), 'new']);
+    const del = messenger.buttons[1];
 
     await press(del!);
     expect(messenger.last?.text).toContain('Больше не слежу');
@@ -159,5 +159,92 @@ describe('Conversation', () => {
     await say('Алматы Стамбул декабрь');
     await bot.handle({ kind: 'text', chatId: 2, text: MENU.list });
     expect(messenger.last).toMatchObject({ chatId: 2, text: expect.stringContaining('Пока ничего') });
+  });
+
+  describe('editing', () => {
+    /** Creates "Алматы → Стамбул, декабрь, one way, any price" and returns its id. */
+    const createWatch = async () => {
+      await say('Алматы Стамбул декабрь');
+      await press('oneway');
+      await press('anyprice');
+      return (await store.listWatches(CHAT))[0]!.id;
+    };
+
+    it('offers the fields to change', async () => {
+      setup([50000]);
+      const id = await createWatch();
+      await press(`edit:${id}`);
+
+      expect(messenger.last?.text).toContain('Что изменить');
+      expect(messenger.buttons).toEqual([
+        `editf:${id}.origin`,
+        `editf:${id}.destination`,
+        `editf:${id}.depart`,
+        `editf:${id}.return`,
+        `editf:${id}.price`,
+        'cancel',
+      ]);
+    });
+
+    it('changes the max price and keeps the price history', async () => {
+      setup([50000]);
+      const id = await createWatch();
+      await press(`editf:${id}.price`);
+      expect(messenger.last?.text).toContain('Когда вам написать');
+
+      await say('45к');
+      expect(messenger.last?.text).toContain('Сохранил');
+      expect(messenger.last?.text).toContain('Сейчас самый дешёвый билет: 50\u00a0000 ₸');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({ id, maxPrice: 45000, lastPrice: 50000 });
+      expect(await store.getDraft(CHAT)).toBeNull();
+    });
+
+    it('changes the destination, resets prices and checks again', async () => {
+      setup([50000, 20000]);
+      const id = await createWatch();
+      await press(`editf:${id}.destination`);
+      expect(messenger.last?.text).toContain('Куда летим');
+
+      await say('Астана');
+      expect(texts().at(-2)).toContain('Алматы → Астана, декабрь 2026');
+      expect(texts().at(-1)).toContain('Нашёл билеты');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({ id, destination: 'NQZ', lastPrice: 20000 });
+      expect(await store.minPrice(id)).toBe(20000);
+    });
+
+    it('rejects the same city on both ends', async () => {
+      setup([50000]);
+      const id = await createWatch();
+      await press(`editf:${id}.destination`);
+      await say('Алматы');
+      expect(messenger.last?.text).toContain('не может совпадать');
+    });
+
+    it('adds a return date and validates it against the departure', async () => {
+      setup([50000, 90000]);
+      const id = await createWatch();
+      await press(`editf:${id}.return`);
+      await say('01.11');
+      expect(messenger.last?.text).toContain('раньше вылета');
+
+      await say('10 января');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({ returnDate: '2027-01-10' });
+    });
+
+    it('changes the departure month with a button', async () => {
+      setup([50000, 45000]);
+      const id = await createWatch();
+      await press(`editf:${id}.depart`);
+      await press('month:2027-01');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({ departDate: '2027-01' });
+    });
+
+    it('cancels editing without changes', async () => {
+      setup([50000]);
+      const id = await createWatch();
+      await press(`editf:${id}.origin`);
+      await press('cancel');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({ origin: 'ALA' });
+    });
   });
 });

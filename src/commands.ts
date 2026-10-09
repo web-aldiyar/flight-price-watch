@@ -34,7 +34,9 @@ export const HELP = [
   'Цены проверяю каждые 15 минут и пишу, только когда стало дешевле.',
 ].join('\n');
 
-/** An unfinished "new watch" dialog, saved between messages. */
+export type Step = 'origin' | 'destination' | 'depart' | 'return' | 'price';
+
+/** An unfinished "new watch" or "edit watch" dialog, saved between messages. */
 export interface Draft {
   origin?: Place;
   destination?: Place;
@@ -45,9 +47,9 @@ export interface Draft {
   maxPrice?: number | null;
   /** City candidates shown as buttons for the current step. */
   options?: Place[];
+  /** Set when changing one field of an existing watch instead of creating one. */
+  edit?: { watchId: number; step: Step };
 }
-
-type Step = 'origin' | 'destination' | 'depart' | 'return' | 'price';
 
 export function nextStep(draft: Draft): Step | null {
   if (!draft.origin) return 'origin';
@@ -57,6 +59,17 @@ export function nextStep(draft: Draft): Step | null {
   if (draft.maxPrice === undefined) return 'price';
   return null;
 }
+
+/** The question the dialog is waiting for an answer to. */
+const currentStep = (draft: Draft): Step | null => draft.edit?.step ?? nextStep(draft);
+
+const EDIT_FIELDS: { step: Step; label: string }[] = [
+  { step: 'origin', label: '🛫 Откуда' },
+  { step: 'destination', label: '🛬 Куда' },
+  { step: 'depart', label: '📅 Дата вылета' },
+  { step: 'return', label: '🔙 Обратный билет' },
+  { step: 'price', label: '💰 Цена' },
+];
 
 const CANCEL: InlineButton = { text: '✖️ Отмена', data: 'cancel' };
 const ONE_WAY = new Set(['нет', 'не нужен', 'не надо', 'в одну сторону', 'одну сторону', 'туда']);
@@ -136,7 +149,7 @@ export class Conversation {
 
   /** Handles an answer to the current question of the dialog. */
   private async answerStep(chatId: number, draft: Draft, text: string): Promise<void> {
-    const step = nextStep(draft);
+    const step = currentStep(draft);
     const lower = text.toLowerCase();
 
     switch (step) {
@@ -158,8 +171,7 @@ export class Conversation {
       case 'depart': {
         const date = parseDate(text, this.today());
         if (!date) return this.send(chatId, 'Не понял дату 🤔 Напишите, например, <i>20.11</i> или <i>ноябрь</i>.', [[CANCEL]]);
-        draft.departDate = date;
-        return this.advance(chatId, draft);
+        return this.setDepart(chatId, draft, date);
       }
       case 'return': {
         if (ONE_WAY.has(lower)) {
@@ -191,22 +203,40 @@ export class Conversation {
     }
   }
 
-  private async pickPlace(chatId: number, draft: Draft, place: Place): Promise<void> {
-    if (draft.origin && place.code === draft.origin.code) {
-      return this.send(chatId, `Вы уже вылетаете из города ${place.name}. Куда летим?`, [[CANCEL]]);
+  private async setDepart(chatId: number, draft: Draft, date: string): Promise<void> {
+    if (draft.returnDate && draft.returnDate < date) {
+      return this.send(
+        chatId,
+        `Обратный вылет у вас ${formatDate(draft.returnDate)} — дата вылета должна быть раньше. Напишите другую дату.`,
+        [[CANCEL]],
+      );
     }
-    if (draft.origin) draft.destination = place;
-    else draft.origin = place;
+    draft.departDate = date;
+    return this.advance(chatId, draft);
+  }
+
+  private async pickPlace(chatId: number, draft: Draft, place: Place): Promise<void> {
+    const field = draft.edit?.step ?? (draft.origin ? 'destination' : 'origin');
+    const other = field === 'origin' ? draft.destination : draft.origin;
+    if (other?.code === place.code) {
+      return this.send(chatId, `Город вылета и прилёта не может совпадать (${place.name}). Напишите другой город.`, [[CANCEL]]);
+    }
+    if (field === 'origin') draft.origin = place;
+    else draft.destination = place;
     delete draft.options;
     await this.advance(chatId, draft);
   }
 
-  /** Saves the draft and asks the next question, or creates the watch when everything is known. */
+  /** Saves the draft and asks the next question, or saves the watch when everything is known. */
   private async advance(chatId: number, draft: Draft): Promise<void> {
+    if (draft.edit) return this.applyEdit(chatId, draft);
     const step = nextStep(draft);
     if (!step) return this.finish(chatId, draft);
     await this.store.setDraft(chatId, draft);
+    return this.ask(chatId, draft, step);
+  }
 
+  private async ask(chatId: number, draft: Draft, step: Step): Promise<void> {
     const route = draft.origin && draft.destination ? `${draft.origin.name} → ${draft.destination.name}` : '';
     switch (step) {
       case 'origin':
@@ -227,12 +257,14 @@ export class Conversation {
           `Вылет: ${formatDate(draft.departDate!)}. <b>Нужен обратный билет?</b>\nНапишите дату возвращения, например <i>05.12</i>, или нажмите кнопку.`,
           this.returnButtons(),
         );
-      case 'price':
+      case 'price': {
+        const current = draft.edit && draft.maxPrice ? `Сейчас: не дороже ${formatPrice(draft.maxPrice, this.currency)}.\n` : '';
         return this.send(
           chatId,
-          `<b>Когда вам написать?</b>\nНапишите сумму, например <i>30000</i>, — сообщу, когда билет будет не дороже. Или нажмите кнопку.`,
+          `${current}<b>Когда вам написать?</b>\nНапишите сумму, например <i>30000</i>, — сообщу, когда билет будет не дороже. Или нажмите кнопку.`,
           this.priceButtons(),
         );
+      }
     }
   }
 
@@ -259,12 +291,23 @@ export class Conversation {
     await this.created(chatId, watch);
   }
 
-  private async created(chatId: number, watch: Watch): Promise<void> {
-    const limit = watch.maxPrice === null ? 'при любом снижении цены' : `когда цена будет не выше ${formatPrice(watch.maxPrice, this.currency)}`;
-    await this.send(chatId, `✅ <b>Готово!</b> Слежу за билетами:\n${describeRoute(watch)}\n\nНапишу ${limit}. Сейчас посмотрю текущую цену…`);
+  private describeLimit(watch: Watch): string {
+    return watch.maxPrice === null
+      ? 'при любом снижении цены'
+      : `когда цена будет не выше ${formatPrice(watch.maxPrice, this.currency)}`;
+  }
 
+  private async created(chatId: number, watch: Watch): Promise<void> {
+    await this.send(
+      chatId,
+      `✅ <b>Готово!</b> Слежу за билетами:\n${describeRoute(watch)}\n\nНапишу ${this.describeLimit(watch)}. Сейчас посмотрю текущую цену…`,
+    );
+    await this.reportFirstCheck(chatId, watch);
+  }
+
+  /** Checks a new or changed watch; the checker itself sends the price unless it is above the max. */
+  private async reportFirstCheck(chatId: number, watch: Watch): Promise<void> {
     try {
-      // The checker reports the current price itself unless it is above the max.
       const offer = await this.checker.check(watch);
       if (!offer) {
         await this.send(chatId, 'Пока билетов по этому направлению не нашлось. Продолжу проверять и напишу, когда появятся.');
@@ -275,6 +318,64 @@ export class Conversation {
       console.error(`Initial check of watch #${watch.id} failed:`, error);
       await this.send(chatId, 'Не получилось узнать цену прямо сейчас — попробую при следующей проверке.');
     }
+  }
+
+  // ---- editing ----
+
+  private async showEditMenu(chatId: number, id: number): Promise<void> {
+    const watch = (await this.store.listWatches(chatId)).find((w) => w.id === id);
+    if (!watch) return this.send(chatId, 'Этого отслеживания уже нет.');
+    await this.store.clearDraft(chatId);
+    const buttons = EDIT_FIELDS.map((f) => ({ text: f.label, data: `editf:${id}.${f.step}` }));
+    await this.send(
+      chatId,
+      `✏️ <b>Что изменить?</b>\n${describeRoute(watch)}\nНапишу ${this.describeLimit(watch)}.`,
+      [...rows(buttons, 2), [CANCEL]],
+    );
+  }
+
+  private async startEdit(chatId: number, id: number, step: Step): Promise<void> {
+    const watch = (await this.store.listWatches(chatId)).find((w) => w.id === id);
+    if (!watch) return this.send(chatId, 'Этого отслеживания уже нет.');
+    const draft: Draft = {
+      origin: { code: watch.origin, name: watch.originName ?? watch.origin, country: '' },
+      destination: { code: watch.destination, name: watch.destinationName ?? watch.destination, country: '' },
+      departDate: watch.departDate,
+      returnDate: watch.returnDate,
+      maxPrice: watch.maxPrice,
+      edit: { watchId: id, step },
+    };
+    await this.store.setDraft(chatId, draft);
+    await this.ask(chatId, draft, step);
+  }
+
+  private async applyEdit(chatId: number, draft: Draft): Promise<void> {
+    const { watchId, step } = draft.edit!;
+    // A new route or dates make the old prices meaningless; a new max price does not.
+    const resetPrices = step !== 'price';
+    await this.store.clearDraft(chatId);
+    const watch = await this.store.updateWatch(
+      chatId,
+      watchId,
+      {
+        origin: draft.origin!.code,
+        destination: draft.destination!.code,
+        originName: draft.origin!.name,
+        destinationName: draft.destination!.name,
+        departDate: draft.departDate!,
+        returnDate: draft.returnDate ?? null,
+        maxPrice: draft.maxPrice ?? null,
+      },
+      resetPrices,
+    );
+    if (!watch) return this.send(chatId, 'Этого отслеживания уже нет.');
+
+    if (resetPrices) {
+      await this.send(chatId, `✅ <b>Сохранил.</b> Теперь слежу:\n${describeRoute(watch)}\n\nСейчас посмотрю цену…`);
+      return this.reportFirstCheck(chatId, watch);
+    }
+    const now = watch.lastPrice === null ? '' : `\nСейчас самый дешёвый билет: ${formatPrice(watch.lastPrice, this.currency)}.`;
+    await this.send(chatId, `✅ <b>Сохранил.</b> Напишу ${this.describeLimit(watch)}.${now}`);
   }
 
   /**
@@ -338,9 +439,14 @@ export class Conversation {
     if (action === 'cancel') return this.cancel(chatId);
     if (action === 'new') return this.startDraft(chatId);
     if (action === 'del') return this.remove(chatId, Number(value));
+    if (action === 'edit') return this.showEditMenu(chatId, Number(value));
+    if (action === 'editf') {
+      const [id, field] = value.split('.');
+      if (EDIT_FIELDS.some((f) => f.step === field)) return this.startEdit(chatId, Number(id), field as Step);
+    }
 
     const draft = await this.store.getDraft<Draft>(chatId);
-    const step = draft && nextStep(draft);
+    const step = draft && currentStep(draft);
     if (!draft || !step) {
       return this.send(chatId, `Эти кнопки уже устарели. Нажмите «${MENU.track}», чтобы начать заново.`);
     }
@@ -349,8 +455,7 @@ export class Conversation {
       const place = draft.options?.find((p) => p.code === value);
       if (place) return this.pickPlace(chatId, draft, place);
     } else if (action === 'month' && step === 'depart') {
-      draft.departDate = value;
-      return this.advance(chatId, draft);
+      return this.setDepart(chatId, draft, value);
     } else if (action === 'oneway' && step === 'return') {
       draft.returnDate = null;
       return this.advance(chatId, draft);
@@ -359,7 +464,7 @@ export class Conversation {
       return this.advance(chatId, draft);
     }
     // A button from an earlier question: repeat the current one.
-    return this.advance(chatId, draft);
+    return this.ask(chatId, draft, step);
   }
 
   // ---- list / remove / check ----
@@ -379,9 +484,12 @@ export class Conversation {
         return `<b>${i + 1}.</b> ${describeRoute(watch)}\n     ${parts.join(' · ')}`;
       }),
     );
-    const buttons = watches.map((watch, i) => ({ text: `🗑 Удалить ${i + 1}`, data: `del:${watch.id}` }));
+    const buttons = watches.map((watch, i) => [
+      { text: `✏️ Изменить ${i + 1}`, data: `edit:${watch.id}` },
+      { text: `🗑 Удалить ${i + 1}`, data: `del:${watch.id}` },
+    ]);
     await this.send(chatId, `📋 <b>Ваши отслеживания</b>\n\n${lines.join('\n\n')}`, [
-      ...rows(buttons, 3),
+      ...buttons,
       [{ text: '➕ Добавить ещё', data: 'new' }],
     ]);
   }

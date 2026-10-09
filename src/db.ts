@@ -118,6 +118,36 @@ export class Store {
     return rows.map(toWatch);
   }
 
+  /** Replaces a watch's route, dates and max price; optionally forgets its price history. */
+  async updateWatch(
+    chatId: number,
+    id: number,
+    watch: Omit<NewWatch, 'chatId'>,
+    resetPrices: boolean,
+  ): Promise<Watch | null> {
+    const [row] = await this.sql(
+      `UPDATE watches SET origin = $3, destination = $4, origin_name = $5, destination_name = $6,
+         depart_date = $7, return_date = $8, max_price = $9,
+         last_price = CASE WHEN $10::boolean THEN NULL ELSE last_price END
+       WHERE id = $1 AND chat_id = $2 RETURNING ${COLUMNS}`,
+      [
+        id,
+        chatId,
+        watch.origin,
+        watch.destination,
+        watch.originName,
+        watch.destinationName,
+        watch.departDate,
+        watch.returnDate,
+        watch.maxPrice,
+        resetPrices,
+      ],
+    );
+    if (!row) return null;
+    if (resetPrices) await this.sql('DELETE FROM price_history WHERE watch_id = $1', [id]);
+    return toWatch(row);
+  }
+
   async removeWatch(chatId: number, id: number): Promise<boolean> {
     const rows = await this.sql('DELETE FROM watches WHERE id = $1 AND chat_id = $2 RETURNING id', [id, chatId]);
     return rows.length > 0;
