@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp, createHttpHandler, webhookSecret } from '../src/app.ts';
 import type { Config } from '../src/config.ts';
-import { memoryQuery, scriptedSource } from './helpers.ts';
+import { fakePlaces, memoryQuery, scriptedSource } from './helpers.ts';
 
 const SECRET = 'cron-secret-123';
 const BASE = 'https://flights.example.vercel.app';
@@ -36,7 +36,7 @@ describe('HTTP handler', () => {
     telegram = telegramFetch();
     const app = createApp(
       { ...config, ...overrides },
-      { query: memoryQuery(), fetchFn: telegram.fetchFn, priceSource: scriptedSource(prices) },
+      { query: memoryQuery(), fetchFn: telegram.fetchFn, priceSource: scriptedSource(prices), placeSearch: fakePlaces },
     );
     handle = createHttpHandler(app, SECRET);
   };
@@ -57,7 +57,7 @@ describe('HTTP handler', () => {
 
     expect(response.status).toBe(200);
     expect(telegram.calls).toEqual([
-      { method: 'sendMessage', body: expect.objectContaining({ chat_id: 42, text: expect.stringContaining('/track') }) },
+      { method: 'sendMessage', body: expect.objectContaining({ chat_id: 42, text: expect.stringContaining('Как начать') }) },
     ]);
   });
 
@@ -83,6 +83,12 @@ describe('HTTP handler', () => {
   it('checks prices for tracked routes when authorized', async () => {
     setup([50000, 45000]);
     await webhook(update('/track ALA IST 2099-12-20'));
+    await webhook(update('нет')); // no return ticket
+    await webhook({
+      update_id: 3,
+      callback_query: { id: 'cb1', data: 'anyprice', message: { chat: { id: 42 } } },
+    });
+    expect(telegram.calls.map((c) => c.method)).toContain('answerCallbackQuery');
 
     const unauthorized = await handle(new Request(`${BASE}/api/check`, { method: 'POST' }));
     expect(unauthorized.status).toBe(401);
@@ -91,7 +97,7 @@ describe('HTTP handler', () => {
       new Request(`${BASE}/api/check`, { method: 'POST', headers: { authorization: `Bearer ${SECRET}` } }),
     );
     expect(await response.json()).toEqual({ checked: 1, failed: 0 });
-    expect(telegram.calls.at(-1)?.body['text']).toContain('Цена снизилась');
+    expect(telegram.calls.at(-1)?.body['text']).toContain('Подешевело');
   });
 
   it('registers the webhook at the deployment URL', async () => {
@@ -102,6 +108,7 @@ describe('HTTP handler', () => {
     expect(telegram.calls[0]?.body).toMatchObject({
       url: `${BASE}/api/telegram`,
       secret_token: webhookSecret(SECRET),
+      allowed_updates: ['message', 'callback_query'],
     });
   });
 

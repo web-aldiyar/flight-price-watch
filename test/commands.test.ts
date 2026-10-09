@@ -1,102 +1,163 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { PriceChecker } from '../src/checker.ts';
-import { CommandHandler, parseTrackArgs } from '../src/commands.ts';
+import { Conversation, MENU } from '../src/commands.ts';
 import type { Store } from '../src/db.ts';
-import { FakeMessenger, memoryStore, scriptedSource } from './helpers.ts';
+import { FakeMessenger, fakePlaces, memoryStore, scriptedSource } from './helpers.ts';
 
 const TODAY = '2026-10-09';
+const CHAT = 1;
 
-describe('parseTrackArgs', () => {
-  it('parses a one-way trip', () => {
-    expect(parseTrackArgs(['ala', 'ist', '2026-12-20'], TODAY)).toEqual({
-      ok: true,
-      watch: { origin: 'ALA', destination: 'IST', departDate: '2026-12-20', returnDate: null, maxPrice: null },
-    });
-  });
-
-  it('parses a round trip by month with a max price', () => {
-    expect(parseTrackArgs(['ALA', 'IST', '2026-12', '2027-01', 'max=60000'], TODAY)).toEqual({
-      ok: true,
-      watch: { origin: 'ALA', destination: 'IST', departDate: '2026-12', returnDate: '2027-01', maxPrice: 60000 },
-    });
-  });
-
-  it('accepts the current month', () => {
-    expect(parseTrackArgs(['ALA', 'IST', '2026-10'], TODAY).ok).toBe(true);
-  });
-
-  it.each([
-    [['ALA', 'IST'], 'Формат'],
-    [['ALMATY', 'IST', '2026-12-20'], 'IATA'],
-    [['ALA', 'ALA', '2026-12-20'], 'совпадают'],
-    [['ALA', 'IST', '20.12.2026'], 'Неверная дата'],
-    [['ALA', 'IST', '2026-10-01'], 'прошла'],
-    [['ALA', 'IST', '2026-09'], 'прошла'],
-    [['ALA', 'IST', '2026-12-20', '2026-12-10'], 'раньше'],
-    [['ALA', 'IST', '2026-12-20', 'max=-5'], 'max'],
-    [['ALA', 'IST', '2026-12-20', 'foo=1'], 'Неизвестный параметр'],
-  ])('rejects %j', (args, error) => {
-    const result = parseTrackArgs(args, TODAY);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain(error);
-  });
-});
-
-describe('CommandHandler', () => {
+describe('Conversation', () => {
   let store: Store;
   let messenger: FakeMessenger;
+  let bot: Conversation;
 
-  const handler = (prices: (number | null)[]) => {
+  const setup = (prices: (number | null)[] = []) => {
     const checker = new PriceChecker(store, scriptedSource(prices), messenger, 'kzt');
-    return new CommandHandler(store, checker, messenger, 'kzt', () => TODAY);
+    bot = new Conversation(store, checker, messenger, fakePlaces, 'kzt', () => TODAY);
   };
+  const say = (text: string) => bot.handle({ kind: 'text', chatId: CHAT, text });
+  const press = (data: string) => bot.handle({ kind: 'button', chatId: CHAT, data, callbackId: 'cb' });
+  const texts = () => messenger.sent.map((m) => m.text);
 
   beforeEach(() => {
     store = memoryStore();
     messenger = new FakeMessenger();
+    setup();
   });
 
-  it('tracks a route, confirms, then reports the current price', async () => {
-    const reply = await handler([52000]).handle(1, '/track ALA IST 2026-12-20');
-
-    expect(reply).toBeNull();
-    expect(messenger.sent.map((m) => m.text)).toEqual([
-      expect.stringContaining('Слежу #1: ALA → IST'),
-      expect.stringContaining('Текущая цена #1'),
-    ]);
-    expect((await store.listWatches(1))[0]?.lastPrice).toBe(52000);
+  it('greets with the menu keyboard', async () => {
+    await say('/start');
+    expect(messenger.last?.text).toContain('Как начать');
+    expect(messenger.last?.options?.menu?.flat()).toContain(MENU.track);
   });
 
-  it('says so when the price is above max', async () => {
-    const reply = await handler([70000]).handle(1, '/track ALA IST 2026-12-20 max=60000');
+  it('walks through the questions step by step', async () => {
+    setup([28000]);
+    await say(MENU.track);
+    expect(messenger.last?.text).toContain('Откуда летим');
 
-    expect(reply).toContain('выше порога');
-    expect(messenger.sent).toHaveLength(1);
+    await say('Шымкент');
+    expect(messenger.last?.text).toContain('Куда летим');
+
+    await say('астана');
+    expect(messenger.last?.text).toContain('Шымкент → Астана. <b>Когда летим?</b>');
+    expect(messenger.buttons).toContain('month:2026-11');
+
+    await press('month:2026-11');
+    expect(messenger.last?.text).toContain('обратный билет');
+
+    await press('oneway');
+    expect(messenger.last?.text).toContain('Когда вам написать');
+
+    await say('30 000');
+    const [watch] = await store.listWatches(CHAT);
+    expect(watch).toMatchObject({
+      origin: 'CIT',
+      destination: 'NQZ',
+      originName: 'Шымкент',
+      destinationName: 'Астана',
+      departDate: '2026-11',
+      returnDate: null,
+      maxPrice: 30000,
+      lastPrice: 28000,
+    });
+    expect(texts().at(-2)).toContain('Готово');
+    expect(texts().at(-1)).toContain('Нашёл билеты');
+    expect(texts().at(-1)).toContain('28\u00a0000 ₸');
+    expect(await store.getDraft(CHAT)).toBeNull();
   });
 
-  it('keeps the watch when the first check fails', async () => {
-    const reply = await handler([]).handle(1, '/track ALA IST 2026-12-20');
+  it('asks which city when the name is ambiguous', async () => {
+    await say(MENU.track);
+    await say('Ур');
+    expect(messenger.last?.text).toContain('Какой именно');
+    expect(messenger.buttons).toEqual(['place:URA', 'place:UGC', 'cancel']);
 
-    expect(reply).toContain('Не удалось');
-    expect(await store.listWatches(1)).toHaveLength(1);
+    await press('place:UGC');
+    expect(messenger.last?.text).toContain('Из города Ургенч');
   });
 
-  it('lists and removes only the caller’s watches', async () => {
-    const h = handler([50000, 40000]);
-    await h.handle(1, '/track ALA IST 2026-12-20');
-    await h.handle(2, '/track NQZ DXB 2026-11');
+  it('explains unknown cities and bad dates without losing progress', async () => {
+    await say(MENU.track);
+    await say('Атлантида');
+    expect(messenger.last?.text).toContain('Не нашёл город «Атлантида»');
 
-    expect(await h.handle(1, '/list')).toContain('ALA → IST');
-    expect(await h.handle(1, '/list')).not.toContain('NQZ');
-    expect(await h.handle(1, '/remove 2')).toContain('не найдено');
-    expect(await h.handle(2, '/remove #2')).toContain('удалено');
-    expect(await h.handle(2, '/list')).toContain('Отслеживаний нет');
+    await say('Алматы');
+    await say('Стамбул');
+    await say('вчера');
+    expect(messenger.last?.text).toContain('Не понял дату');
+
+    await say('20 декабря');
+    expect(messenger.last?.text).toContain('Вылет: 20 декабря 2026');
+    await say('05.01');
+    expect(messenger.last?.text).toContain('Когда вам написать');
+    await press('anyprice');
+
+    expect((await store.listWatches(CHAT))[0]).toMatchObject({ departDate: '2026-12-20', returnDate: '2027-01-05', maxPrice: null });
   });
 
-  it('handles /help with a bot-name suffix and ignores plain text', async () => {
-    const h = handler([]);
-    expect(await h.handle(1, '/help@flight_bot')).toContain('/track');
-    expect(await h.handle(1, 'привет')).toBeNull();
-    expect(await h.handle(1, '/foo')).toContain('Неизвестная команда');
+  it('understands a whole request in one message', async () => {
+    setup([31000]);
+    await say('Шымкент Астана ноябрь до 30000');
+    // Only the return question is left.
+    expect(messenger.last?.text).toContain('обратный билет');
+
+    await say('нет');
+    const [watch] = await store.listWatches(CHAT);
+    expect(watch).toMatchObject({ origin: 'CIT', destination: 'NQZ', departDate: '2026-11', returnDate: null, maxPrice: 30000 });
+    expect(messenger.last?.text).toContain('дороже вашей суммы');
+  });
+
+  it('understands round trips in one message', async () => {
+    await say('из Алматы в Стамбул 20.12 обратно 5 января');
+    expect(messenger.last?.text).toContain('Когда вам написать');
+    expect(await store.getDraft(CHAT)).toMatchObject({ departDate: '2026-12-20', returnDate: '2027-01-05' });
+  });
+
+  it('asks for what is missing from a partial message', async () => {
+    await say('Алматы Стамбул');
+    expect(messenger.last?.text).toContain('Когда летим');
+  });
+
+  it('suggests the menu for gibberish', async () => {
+    await say('привет как дела бот');
+    expect(messenger.last?.text).toContain('Не совсем понял');
+  });
+
+  it('cancels the dialog', async () => {
+    await say(MENU.track);
+    await press('cancel');
+    expect(messenger.last?.text).toContain('отменил');
+    expect(await store.getDraft(CHAT)).toBeNull();
+  });
+
+  it('handles stale buttons', async () => {
+    await press('month:2026-11');
+    expect(messenger.last?.text).toContain('устарели');
+  });
+
+  it('lists and deletes watches with buttons', async () => {
+    setup([50000, 40000]);
+    await say('Алматы Стамбул декабрь');
+    await press('oneway');
+    await press('anyprice');
+
+    await say(MENU.list);
+    expect(messenger.last?.text).toContain('Алматы → Стамбул, декабрь 2026, в одну сторону');
+    expect(messenger.last?.text).toContain('сейчас 50\u00a0000 ₸');
+    const [del] = messenger.buttons;
+    expect(del).toMatch(/^del:\d+$/);
+
+    await press(del!);
+    expect(messenger.last?.text).toContain('Больше не слежу');
+    await say(MENU.list);
+    expect(messenger.last?.text).toContain('Пока ничего не отслеживаю');
+  });
+
+  it('keeps chats separate', async () => {
+    await say('Алматы Стамбул декабрь');
+    await bot.handle({ kind: 'text', chatId: 2, text: MENU.list });
+    expect(messenger.last).toMatchObject({ chatId: 2, text: expect.stringContaining('Пока ничего') });
   });
 });

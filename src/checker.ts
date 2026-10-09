@@ -17,9 +17,9 @@ export function shouldNotify(watch: Watch, price: number): boolean {
 export function buildAlert(watch: Watch, offer: Offer, currency: string): string {
   const header =
     watch.lastPrice === null
-      ? `✈️ Текущая цена #${watch.id}`
-      : `📉 Цена снизилась #${watch.id}: было ${formatPrice(watch.lastPrice, currency)}`;
-  return `${header}\n${describeRoute(watch)}\n\n${describeOffer(offer, currency)}`;
+      ? `✈️ <b>Нашёл билеты</b>\n${describeRoute(watch)}`
+      : `📉 <b>Подешевело!</b> Было ${formatPrice(watch.lastPrice, currency)}\n${describeRoute(watch)}`;
+  return `${header}\n\n${describeOffer(offer, currency)}`;
 }
 
 export class PriceChecker {

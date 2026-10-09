@@ -1,43 +1,52 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createAviasalesSource, type PriceSource } from './aviasales.ts';
 import { PriceChecker } from './checker.ts';
-import { BOT_COMMANDS, CommandHandler } from './commands.ts';
+import { BOT_COMMANDS, Conversation } from './commands.ts';
 import type { Config } from './config.ts';
 import { Store, type Query } from './db.ts';
-import { parseUpdate, TelegramBot, type IncomingMessage, type Update } from './telegram.ts';
+import { createPlaceSearch, type PlaceSearch } from './places.ts';
+import { parseUpdate, TelegramBot, type Incoming, type Update } from './telegram.ts';
 
 export interface App {
   bot: TelegramBot;
   checker: PriceChecker;
-  handleMessage(message: IncomingMessage): Promise<void>;
+  handleUpdate(update: Incoming): Promise<void>;
 }
 
 export interface AppDeps {
   query: Query;
   fetchFn?: typeof fetch;
   priceSource?: PriceSource;
+  placeSearch?: PlaceSearch;
+  today?: () => string;
 }
 
 export function createApp(config: Config, deps: AppDeps): App {
   const store = new Store(deps.query);
   const bot = new TelegramBot(config.telegramToken, deps.fetchFn);
   const source = deps.priceSource ?? createAviasalesSource(config.travelpayoutsToken, config.currency, deps.fetchFn);
+  const places = deps.placeSearch ?? createPlaceSearch(deps.fetchFn);
   const checker = new PriceChecker(store, source, bot, config.currency);
-  const commands = new CommandHandler(store, checker, bot, config.currency);
+  const conversation = new Conversation(store, checker, bot, places, config.currency, deps.today);
 
   return {
     bot,
     checker,
-    async handleMessage({ chatId, text }) {
+    async handleUpdate(update) {
       try {
-        if (config.allowedChatIds && !config.allowedChatIds.has(chatId)) {
-          await bot.send(chatId, 'Доступ к боту ограничен.');
+        if (update.kind === 'button') {
+          await bot.answerButton(update.callbackId).catch((error: unknown) => console.error('answerCallbackQuery failed:', error));
+        }
+        if (config.allowedChatIds && !config.allowedChatIds.has(update.chatId)) {
+          await bot.send(update.chatId, 'Доступ к боту ограничен.');
           return;
         }
-        const reply = await commands.handle(chatId, text);
-        if (reply) await bot.send(chatId, reply);
+        await conversation.handle(update);
       } catch (error) {
-        console.error('Failed to handle message:', error);
+        console.error('Failed to handle update:', error);
+        await bot
+          .send(update.chatId, 'Что-то пошло не так 😕 Попробуйте ещё раз чуть позже.')
+          .catch(() => {});
       }
     },
   };
@@ -79,9 +88,9 @@ export function createHttpHandler(app: App, cronSecret: string): (request: Reque
         if (!safeEqual(request.headers.get('x-telegram-bot-api-secret-token') ?? '', hookSecret)) {
           return text('Unauthorized', 401);
         }
-        const message = parseUpdate((await request.json()) as Update);
+        const update = parseUpdate((await request.json()) as Update);
         // Reply before responding: the function may be frozen as soon as the response is sent.
-        if (message) await app.handleMessage(message);
+        if (update) await app.handleUpdate(update);
         return text('ok');
       }
       case '/api/check': {

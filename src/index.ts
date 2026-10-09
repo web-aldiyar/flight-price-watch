@@ -32,8 +32,8 @@ await app.bot.setCommands(BOT_COMMANDS).catch((error: unknown) => console.error(
 console.log(`Bot started (polling), checking prices every ${config.checkIntervalMinutes} min`);
 void runChecks();
 
-for await (const message of app.bot.messages(shutdown.signal)) {
-  await app.handleMessage(message);
+for await (const update of app.bot.updates(shutdown.signal)) {
+  await app.handleUpdate(update);
 }
 
 clearInterval(timer);

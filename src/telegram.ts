@@ -1,24 +1,45 @@
-export interface IncomingMessage {
-  chatId: number;
+export type Incoming =
+  | { kind: 'text'; chatId: number; text: string }
+  | { kind: 'button'; chatId: number; data: string; callbackId: string };
+
+export interface InlineButton {
   text: string;
+  /** Sent back as callback data when pressed (max 64 bytes). */
+  data: string;
+}
+
+export interface SendOptions {
+  /** Buttons attached to the message. */
+  buttons?: InlineButton[][];
+  /** Show the main menu keyboard under the input field. */
+  menu?: string[][];
 }
 
 export interface Messenger {
-  send(chatId: number, text: string): Promise<void>;
+  send(chatId: number, text: string, options?: SendOptions): Promise<void>;
 }
 
 export interface Update {
   update_id: number;
   message?: { chat: { id: number }; text?: string };
+  callback_query?: { id: string; data?: string; message?: { chat: { id: number } } };
 }
 
-/** The text message carried by an update, if any. */
-export function parseUpdate(update: Update): IncomingMessage | null {
+export const ALLOWED_UPDATES = ['message', 'callback_query'];
+
+/** A text message or a button press carried by an update, if any. */
+export function parseUpdate(update: Update): Incoming | null {
   const text = update.message?.text;
-  return update.message && text ? { chatId: update.message.chat.id, text } : null;
+  if (update.message && text) return { kind: 'text', chatId: update.message.chat.id, text };
+
+  const query = update.callback_query;
+  if (query?.data && query.message) {
+    return { kind: 'button', chatId: query.message.chat.id, data: query.data, callbackId: query.id };
+  }
+  return null;
 }
 
-/** Minimal Telegram Bot API client (long polling), no dependencies. */
+/** Minimal Telegram Bot API client (webhook or long polling), no dependencies. */
 export class TelegramBot implements Messenger {
   private offset = 0;
   private readonly baseUrl: string;
@@ -41,13 +62,31 @@ export class TelegramBot implements Messenger {
     return body.result;
   }
 
-  async send(chatId: number, text: string): Promise<void> {
+  async send(chatId: number, text: string, options: SendOptions = {}): Promise<void> {
+    let replyMarkup: object | undefined;
+    if (options.buttons) {
+      replyMarkup = {
+        inline_keyboard: options.buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))),
+      };
+    } else if (options.menu) {
+      replyMarkup = {
+        keyboard: options.menu.map((row) => row.map((text) => ({ text }))),
+        resize_keyboard: true,
+        is_persistent: true,
+      };
+    }
     await this.call('sendMessage', {
       chat_id: chatId,
       text,
       parse_mode: 'HTML',
       link_preview_options: { is_disabled: true },
+      reply_markup: replyMarkup,
     });
+  }
+
+  /** Stops the loading spinner on a pressed button. */
+  async answerButton(callbackId: string): Promise<void> {
+    await this.call('answerCallbackQuery', { callback_query_id: callbackId });
   }
 
   async setCommands(commands: { command: string; description: string }[]): Promise<void> {
@@ -55,17 +94,17 @@ export class TelegramBot implements Messenger {
   }
 
   async setWebhook(url: string, secretToken: string): Promise<void> {
-    await this.call('setWebhook', { url, secret_token: secretToken, allowed_updates: ['message'] });
+    await this.call('setWebhook', { url, secret_token: secretToken, allowed_updates: ALLOWED_UPDATES });
   }
 
-  /** Long-polls for text messages until the signal is aborted. */
-  async *messages(signal: AbortSignal): AsyncGenerator<IncomingMessage> {
+  /** Long-polls for messages and button presses until the signal is aborted. */
+  async *updates(signal: AbortSignal): AsyncGenerator<Incoming> {
     while (!signal.aborted) {
       let updates: Update[];
       try {
         updates = await this.call<Update[]>(
           'getUpdates',
-          { offset: this.offset, timeout: 30, allowed_updates: ['message'] },
+          { offset: this.offset, timeout: 30, allowed_updates: ALLOWED_UPDATES },
           signal,
         );
       } catch (error) {
@@ -76,8 +115,8 @@ export class TelegramBot implements Messenger {
       }
       for (const update of updates) {
         this.offset = update.update_id + 1;
-        const message = parseUpdate(update);
-        if (message) yield message;
+        const incoming = parseUpdate(update);
+        if (incoming) yield incoming;
       }
     }
   }

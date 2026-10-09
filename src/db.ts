@@ -1,8 +1,12 @@
 export interface Watch {
   id: number;
   chatId: number;
+  /** IATA city codes. */
   origin: string;
   destination: string;
+  /** City names for display; null for watches created with bare codes. */
+  originName: string | null;
+  destinationName: string | null;
   /** YYYY-MM-DD or YYYY-MM (whole month). */
   departDate: string;
   /** YYYY-MM-DD or YYYY-MM; null for one-way. */
@@ -13,7 +17,10 @@ export interface Watch {
   createdAt: string;
 }
 
-export type NewWatch = Pick<Watch, 'chatId' | 'origin' | 'destination' | 'departDate' | 'returnDate' | 'maxPrice'>;
+export type NewWatch = Pick<
+  Watch,
+  'chatId' | 'origin' | 'destination' | 'originName' | 'destinationName' | 'departDate' | 'returnDate' | 'maxPrice'
+>;
 
 /** Runs one parameterized SQL statement and returns its rows (Neon HTTP driver or PGlite). */
 export type Query = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -37,10 +44,18 @@ const SCHEMA = [
     checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`,
   `CREATE INDEX IF NOT EXISTS price_history_watch ON price_history (watch_id, checked_at)`,
+  `ALTER TABLE watches ADD COLUMN IF NOT EXISTS origin_name TEXT`,
+  `ALTER TABLE watches ADD COLUMN IF NOT EXISTS destination_name TEXT`,
+  // Unfinished "new watch" dialog per chat (the bot is stateless between webhook calls).
+  `CREATE TABLE IF NOT EXISTS chat_drafts (
+    chat_id    BIGINT PRIMARY KEY,
+    draft      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
 ];
 
 // Casts keep row values driver-independent (BIGINT and timestamps come back as strings or objects otherwise).
-const COLUMNS = `id, chat_id::float8 AS chat_id, origin, destination, depart_date, return_date,
+const COLUMNS = `id, chat_id::float8 AS chat_id, origin, destination, origin_name, destination_name, depart_date, return_date,
   max_price, last_price, created_at::text AS created_at`;
 
 const toWatch = (row: Record<string, unknown>): Watch => ({
@@ -48,6 +63,8 @@ const toWatch = (row: Record<string, unknown>): Watch => ({
   chatId: Number(row['chat_id']),
   origin: String(row['origin']),
   destination: String(row['destination']),
+  originName: (row['origin_name'] as string | null) ?? null,
+  destinationName: (row['destination_name'] as string | null) ?? null,
   departDate: String(row['depart_date']),
   returnDate: (row['return_date'] as string | null) ?? null,
   maxPrice: row['max_price'] == null ? null : Number(row['max_price']),
@@ -77,9 +94,18 @@ export class Store {
 
   async addWatch(watch: NewWatch): Promise<Watch> {
     const [row] = await this.sql(
-      `INSERT INTO watches (chat_id, origin, destination, depart_date, return_date, max_price)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${COLUMNS}`,
-      [watch.chatId, watch.origin, watch.destination, watch.departDate, watch.returnDate, watch.maxPrice],
+      `INSERT INTO watches (chat_id, origin, destination, origin_name, destination_name, depart_date, return_date, max_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${COLUMNS}`,
+      [
+        watch.chatId,
+        watch.origin,
+        watch.destination,
+        watch.originName,
+        watch.destinationName,
+        watch.departDate,
+        watch.returnDate,
+        watch.maxPrice,
+      ],
     );
     return toWatch(row!);
   }
@@ -108,5 +134,22 @@ export class Store {
   async minPrice(watchId: number): Promise<number | null> {
     const [row] = await this.sql('SELECT MIN(price) AS min FROM price_history WHERE watch_id = $1', [watchId]);
     return row?.['min'] == null ? null : Number(row['min']);
+  }
+
+  async getDraft<T>(chatId: number): Promise<T | null> {
+    const [row] = await this.sql('SELECT draft::text AS draft FROM chat_drafts WHERE chat_id = $1', [chatId]);
+    return row ? (JSON.parse(String(row['draft'])) as T) : null;
+  }
+
+  async setDraft(chatId: number, draft: unknown): Promise<void> {
+    await this.sql(
+      `INSERT INTO chat_drafts (chat_id, draft) VALUES ($1, $2::jsonb)
+       ON CONFLICT (chat_id) DO UPDATE SET draft = EXCLUDED.draft, updated_at = now()`,
+      [chatId, JSON.stringify(draft)],
+    );
+  }
+
+  async clearDraft(chatId: number): Promise<void> {
+    await this.sql('DELETE FROM chat_drafts WHERE chat_id = $1', [chatId]);
   }
 }
