@@ -109,3 +109,14 @@ describe('HTTP handler', () => {
     expect((await handle(new Request(`${BASE}/api/nope`))).status).toBe(404);
   });
 });
+
+describe('loadConfig', () => {
+  const base = { TELEGRAM_BOT_TOKEN: 't', TRAVELPAYOUTS_TOKEN: 'p' };
+
+  it('reads the database URL under the names the Vercel Neon integration uses', async () => {
+    const { loadConfig } = await import('../src/config.ts');
+    expect(loadConfig({ ...base, STORAGE_URL: 'postgresql://storage' }).databaseUrl).toBe('postgresql://storage');
+    expect(loadConfig({ ...base, POSTGRES_URL: 'postgresql://pg' }).databaseUrl).toBe('postgresql://pg');
+    expect(loadConfig({ ...base, DATABASE_URL: 'postgresql://db', STORAGE_URL: 'x' }).databaseUrl).toBe('postgresql://db');
+  });
+});

@@ -30,7 +30,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     telegramToken: required('TELEGRAM_BOT_TOKEN'),
     travelpayoutsToken: required('TRAVELPAYOUTS_TOKEN'),
     currency: (optional('CURRENCY') ?? 'rub').toLowerCase(),
-    databaseUrl: optional('DATABASE_URL'),
+    // The Vercel Neon integration names the variable after its prefix (STORAGE_ by default).
+    databaseUrl: optional('DATABASE_URL') ?? optional('POSTGRES_URL') ?? optional('STORAGE_URL'),
     cronSecret: optional('CRON_SECRET'),
     checkIntervalMinutes: interval,
     allowedChatIds: allowed ? new Set(allowed.split(',').map((id) => Number(id.trim()))) : null,

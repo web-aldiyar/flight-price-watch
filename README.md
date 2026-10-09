@@ -54,7 +54,7 @@ GitHub Actions (каждые 15 мин) ──▶ Vercel /api/check ──▶ Av
    | --- | --- |
    | `TELEGRAM_BOT_TOKEN` | токен бота |
    | `TRAVELPAYOUTS_TOKEN` | токен Travelpayouts |
-   | `DATABASE_URL` | строка подключения Neon |
+   | `DATABASE_URL` | строка подключения Neon (при подключении Neon через Vercel Storage подойдёт и `STORAGE_URL`) |
    | `CRON_SECRET` | ваша случайная строка |
    | `CURRENCY` | `kzt` (или `rub`, `usd`, ...) |
    | `ALLOWED_CHAT_IDS` | необязательно: ваш chat id (узнать у @userinfobot), чтобы бот отвечал только вам |
