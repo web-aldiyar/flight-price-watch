@@ -4,6 +4,8 @@ export interface Place {
   /** City name in Russian, e.g. "Шымкент". */
   name: string;
   country: string;
+  /** ISO country code, e.g. "KZ". */
+  countryCode: string;
 }
 
 export type PlaceSearch = (term: string) => Promise<Place[]>;
@@ -13,6 +15,7 @@ interface ApiPlace {
   code: string;
   name: string;
   country_name?: string;
+  country_code?: string;
 }
 
 const API_URL = 'https://autocomplete.travelpayouts.com/places2';
@@ -30,6 +33,11 @@ export function createPlaceSearch(fetchFn: typeof fetch = fetch): PlaceSearch {
     return places
       .filter((place) => place.type === 'city' && place.code && !seen.has(place.code) && seen.add(place.code))
       .slice(0, 5)
-      .map((place) => ({ code: place.code, name: place.name, country: place.country_name ?? '' }));
+      .map((place) => ({
+        code: place.code,
+        name: place.name,
+        country: place.country_name ?? '',
+        countryCode: place.country_code ?? '',
+      }));
   };
 }

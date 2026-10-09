@@ -19,12 +19,13 @@ export class FakeMessenger implements Messenger {
 }
 
 const CITIES: Place[] = [
-  { code: 'CIT', name: 'Шымкент', country: 'Казахстан' },
-  { code: 'NQZ', name: 'Астана', country: 'Казахстан' },
-  { code: 'ALA', name: 'Алматы', country: 'Казахстан' },
-  { code: 'IST', name: 'Стамбул', country: 'Турция' },
-  { code: 'URA', name: 'Уральск', country: 'Казахстан' },
-  { code: 'UGC', name: 'Ургенч', country: 'Узбекистан' },
+  { code: 'CIT', name: 'Шымкент', country: 'Казахстан', countryCode: 'KZ' },
+  { code: 'NQZ', name: 'Астана', country: 'Казахстан', countryCode: 'KZ' },
+  { code: 'ALA', name: 'Алматы', country: 'Казахстан', countryCode: 'KZ' },
+  { code: 'IST', name: 'Стамбул', country: 'Турция', countryCode: 'TR' },
+  { code: 'URA', name: 'Уральск', country: 'Казахстан', countryCode: 'KZ' },
+  { code: 'UGC', name: 'Ургенч', country: 'Узбекистан', countryCode: 'UZ' },
+  { code: 'DXB', name: 'Дубай', country: 'ОАЭ', countryCode: 'AE' },
 ];
 
 /** Offline city search: prefix match on name or exact code. */

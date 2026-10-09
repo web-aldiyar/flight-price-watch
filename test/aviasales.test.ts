@@ -78,12 +78,12 @@ describe('createAviasalesSource', () => {
       return jsonResponse({ success: true, data: [ticket('NQZ', 15000), ticket('NQZ', 16000), ticket('IST', 42000)] });
     }) as typeof fetch;
 
-    const offers = await createExploreSource('t', 'kzt', fetchFn)('ALA', '2026-11');
+    const offers = await createExploreSource('t', 'kzt', fetchFn)('ALA');
 
     const params = new URL(url).searchParams;
     expect(params.get('origin')).toBe('ALA');
     expect(params.has('destination')).toBe(false);
-    expect(params.get('departure_at')).toBe('2026-11');
+    expect(params.has('departure_at')).toBe(false);
     expect(offers.map((o) => [o.destination, o.price])).toEqual([
       ['NQZ', 15000],
       ['IST', 42000],

@@ -81,14 +81,13 @@ export interface DestinationOffer extends Offer {
   destination: string;
 }
 
-/** Cheapest one-way tickets from a city to anywhere in a month: one per destination, cheapest first. */
-export type ExploreSource = (origin: string, month: string) => Promise<DestinationOffer[]>;
+/** Cheapest one-way tickets from a city to anywhere, on any upcoming date: one per destination, cheapest first. */
+export type ExploreSource = (origin: string) => Promise<DestinationOffer[]>;
 
 export function createExploreSource(token: string, currency: string, fetchFn: typeof fetch = fetch): ExploreSource {
-  return async (origin, month) => {
+  return async (origin) => {
     const params = new URLSearchParams({
       origin,
-      departure_at: month,
       one_way: 'true',
       sorting: 'price',
       currency,
@@ -98,7 +97,7 @@ export function createExploreSource(token: string, currency: string, fetchFn: ty
     const seen = new Set<string>();
     return tickets
       .filter((ticket) => ticket.destination && !seen.has(ticket.destination) && seen.add(ticket.destination))
-      .slice(0, 10)
+      .slice(0, 50)
       .map((ticket) => ({ ...toOffer(ticket), destination: ticket.destination }));
   };
 }
