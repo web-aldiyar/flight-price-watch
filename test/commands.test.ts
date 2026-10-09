@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { PriceChecker } from '../src/checker.ts';
 import { CommandHandler, parseTrackArgs } from '../src/commands.ts';
-import { Store } from '../src/db.ts';
-import { FakeMessenger, scriptedSource } from './helpers.ts';
+import type { Store } from '../src/db.ts';
+import { FakeMessenger, memoryStore, scriptedSource } from './helpers.ts';
 
 const TODAY = '2026-10-09';
 
@@ -52,7 +52,7 @@ describe('CommandHandler', () => {
   };
 
   beforeEach(() => {
-    store = new Store(':memory:');
+    store = memoryStore();
     messenger = new FakeMessenger();
   });
 
@@ -64,7 +64,7 @@ describe('CommandHandler', () => {
       expect.stringContaining('Слежу #1: ALA → IST'),
       expect.stringContaining('Текущая цена #1'),
     ]);
-    expect(store.listWatches(1)[0]?.lastPrice).toBe(52000);
+    expect((await store.listWatches(1))[0]?.lastPrice).toBe(52000);
   });
 
   it('says so when the price is above max', async () => {
@@ -78,7 +78,7 @@ describe('CommandHandler', () => {
     const reply = await handler([]).handle(1, '/track ALA IST 2026-12-20');
 
     expect(reply).toContain('Не удалось');
-    expect(store.listWatches(1)).toHaveLength(1);
+    expect(await store.listWatches(1)).toHaveLength(1);
   });
 
   it('lists and removes only the caller’s watches', async () => {

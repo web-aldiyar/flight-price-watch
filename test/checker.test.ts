@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { PriceChecker, shouldNotify } from '../src/checker.ts';
-import { Store, type Watch } from '../src/db.ts';
-import { FakeMessenger, offer, scriptedSource } from './helpers.ts';
+import type { Store, Watch } from '../src/db.ts';
+import { FakeMessenger, memoryStore, offer, scriptedSource } from './helpers.ts';
 
 const watch = (overrides: Partial<Watch> = {}): Watch => ({
   id: 1,
@@ -34,12 +34,12 @@ describe('PriceChecker.checkAll', () => {
   let messenger: FakeMessenger;
 
   beforeEach(() => {
-    store = new Store(':memory:');
+    store = memoryStore();
     messenger = new FakeMessenger();
   });
 
   it('alerts only on drops and keeps price history', async () => {
-    store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', departDate: '2026-12', returnDate: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', departDate: '2026-12', returnDate: null, maxPrice: null });
     const checker = new PriceChecker(store, scriptedSource([50000, 55000, 48000]), messenger, 'kzt');
 
     await checker.checkAll();
@@ -50,12 +50,12 @@ describe('PriceChecker.checkAll', () => {
       '✈️ Текущая цена #1',
       '📉 Цена снизилась #1: было 55 000 KZT',
     ]);
-    expect(store.minPrice(1)).toBe(48000);
+    expect(await store.minPrice(1)).toBe(48000);
   });
 
   it('continues with other watches when one fails', async () => {
-    store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', departDate: '2026-12', returnDate: null, maxPrice: null });
-    store.addWatch({ chatId: 7, origin: 'NQZ', destination: 'DXB', departDate: '2026-12', returnDate: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', departDate: '2026-12', returnDate: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'NQZ', destination: 'DXB', departDate: '2026-12', returnDate: null, maxPrice: null });
     const source = async (query: { origin: string }) => {
       if (query.origin === 'ALA') throw new Error('API down');
       return offer(30000);

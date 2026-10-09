@@ -122,7 +122,7 @@ export class CommandHandler {
     const parsed = parseTrackArgs(args, this.today());
     if (!parsed.ok) return parsed.error;
 
-    const watch = this.store.addWatch({ chatId, ...parsed.watch });
+    const watch = await this.store.addWatch({ chatId, ...parsed.watch });
     const limit =
       watch.maxPrice === null ? '' : `\nУведомлю, когда цена будет не выше ${formatPrice(watch.maxPrice, this.currency)}.`;
     await this.messenger.send(chatId, `Слежу #${watch.id}: ${describeRoute(watch)}${limit}`);
@@ -141,28 +141,29 @@ export class CommandHandler {
     }
   }
 
-  private list(chatId: number): string {
-    const watches = this.store.listWatches(chatId);
+  private async list(chatId: number): Promise<string> {
+    const watches = await this.store.listWatches(chatId);
     if (watches.length === 0) return 'Отслеживаний нет. Добавьте: /track ALA IST 2026-12-20';
-    return watches
-      .map((watch) => {
+    const lines = await Promise.all(
+      watches.map(async (watch) => {
         const last = watch.lastPrice === null ? 'цена ещё неизвестна' : formatPrice(watch.lastPrice, this.currency);
-        const min = this.store.minPrice(watch.id);
+        const min = await this.store.minPrice(watch.id);
         const minText = min === null || min === watch.lastPrice ? '' : `, минимум ${formatPrice(min, this.currency)}`;
         const limit = watch.maxPrice === null ? '' : `, порог ${formatPrice(watch.maxPrice, this.currency)}`;
         return `#${watch.id} ${describeRoute(watch)}\n   ${last}${minText}${limit}`;
-      })
-      .join('\n');
+      }),
+    );
+    return lines.join('\n');
   }
 
-  private remove(chatId: number, rawId: string | undefined): string {
+  private async remove(chatId: number, rawId: string | undefined): Promise<string> {
     const id = Number(rawId?.replace('#', ''));
     if (!Number.isInteger(id)) return 'Укажите номер: /remove 3';
-    return this.store.removeWatch(chatId, id) ? `Отслеживание #${id} удалено.` : `Отслеживание #${id} не найдено.`;
+    return (await this.store.removeWatch(chatId, id)) ? `Отслеживание #${id} удалено.` : `Отслеживание #${id} не найдено.`;
   }
 
   private async checkNow(chatId: number): Promise<string> {
-    const watches = this.store.listWatches(chatId);
+    const watches = await this.store.listWatches(chatId);
     if (watches.length === 0) return 'Отслеживаний нет.';
     let failed = 0;
     for (const watch of watches) {

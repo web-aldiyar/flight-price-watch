@@ -47,17 +47,26 @@ export class PriceChecker {
     if (shouldNotify(watch, offer.price)) {
       await this.messenger.send(watch.chatId, buildAlert(watch, offer, this.currency));
     }
-    this.store.recordPrice(watch.id, offer.price);
+    await this.store.recordPrice(watch.id, offer.price);
     return offer;
   }
 
-  async checkAll(): Promise<void> {
-    for (const watch of this.store.listWatches()) {
-      try {
-        await this.check(watch);
-      } catch (error) {
-        console.error(`Failed to check watch #${watch.id}:`, error);
+  /** Checks every watch, a few at a time; returns how many were checked and how many failed. */
+  async checkAll(concurrency = 4): Promise<{ checked: number; failed: number }> {
+    const queue = await this.store.listWatches();
+    const total = queue.length;
+    let failed = 0;
+    const worker = async () => {
+      for (let watch = queue.shift(); watch; watch = queue.shift()) {
+        try {
+          await this.check(watch);
+        } catch (error) {
+          failed++;
+          console.error(`Failed to check watch #${watch.id}:`, error);
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    return { checked: total, failed };
   }
 }

@@ -1,4 +1,6 @@
+import { PGlite } from '@electric-sql/pglite';
 import type { Offer, PriceQuery, PriceSource } from '../src/aviasales.ts';
+import { Store, type Query } from '../src/db.ts';
 import type { Messenger } from '../src/telegram.ts';
 
 export class FakeMessenger implements Messenger {
@@ -7,6 +9,14 @@ export class FakeMessenger implements Messenger {
     this.sent.push({ chatId, text });
   }
 }
+
+/** In-memory Postgres (PGlite), no mocks. */
+export function memoryQuery(): Query {
+  const db = new PGlite();
+  return async (text, params) => (await db.query<Record<string, unknown>>(text, params)).rows;
+}
+
+export const memoryStore = (): Store => new Store(memoryQuery());
 
 export const offer = (price: number): Offer => ({
   price,

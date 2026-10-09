@@ -7,9 +7,15 @@ export interface Messenger {
   send(chatId: number, text: string): Promise<void>;
 }
 
-interface Update {
+export interface Update {
   update_id: number;
   message?: { chat: { id: number }; text?: string };
+}
+
+/** The text message carried by an update, if any. */
+export function parseUpdate(update: Update): IncomingMessage | null {
+  const text = update.message?.text;
+  return update.message && text ? { chatId: update.message.chat.id, text } : null;
 }
 
 /** Minimal Telegram Bot API client (long polling), no dependencies. */
@@ -48,6 +54,10 @@ export class TelegramBot implements Messenger {
     await this.call('setMyCommands', { commands });
   }
 
+  async setWebhook(url: string, secretToken: string): Promise<void> {
+    await this.call('setWebhook', { url, secret_token: secretToken, allowed_updates: ['message'] });
+  }
+
   /** Long-polls for text messages until the signal is aborted. */
   async *messages(signal: AbortSignal): AsyncGenerator<IncomingMessage> {
     while (!signal.aborted) {
@@ -66,8 +76,8 @@ export class TelegramBot implements Messenger {
       }
       for (const update of updates) {
         this.offset = update.update_id + 1;
-        const text = update.message?.text;
-        if (update.message && text) yield { chatId: update.message.chat.id, text };
+        const message = parseUpdate(update);
+        if (message) yield message;
       }
     }
   }
