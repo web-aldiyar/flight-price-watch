@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createAviasalesSource } from '../src/aviasales.ts';
+import { createAviasalesSource, createExploreSource } from '../src/aviasales.ts';
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -61,5 +61,33 @@ describe('createAviasalesSource', () => {
     const fetchFn = (async () => jsonResponse({}, 401)) as typeof fetch;
     const source = createAviasalesSource('bad', 'rub', fetchFn);
     await expect(source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null })).rejects.toThrow('401');
+  });
+
+  it('finds the cheapest ticket per destination for "anywhere"', async () => {
+    let url = '';
+    const ticket = (destination: string, price: number) => ({
+      destination,
+      price,
+      airline: 'KC',
+      departure_at: '2026-11-12T08:00:00+05:00',
+      transfers: 0,
+      link: `/search/ALA1211${destination}1`,
+    });
+    const fetchFn = (async (input: string) => {
+      url = input;
+      return jsonResponse({ success: true, data: [ticket('NQZ', 15000), ticket('NQZ', 16000), ticket('IST', 42000)] });
+    }) as typeof fetch;
+
+    const offers = await createExploreSource('t', 'kzt', fetchFn)('ALA', '2026-11');
+
+    const params = new URL(url).searchParams;
+    expect(params.get('origin')).toBe('ALA');
+    expect(params.has('destination')).toBe(false);
+    expect(params.get('departure_at')).toBe('2026-11');
+    expect(offers.map((o) => [o.destination, o.price])).toEqual([
+      ['NQZ', 15000],
+      ['IST', 42000],
+    ]);
+    expect(offers[0]?.link).toBe('https://www.aviasales.ru/search/ALA1211NQZ1');
   });
 });

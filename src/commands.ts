@@ -1,3 +1,4 @@
+import type { DestinationOffer, ExploreSource } from './aviasales.ts';
 import type { PriceChecker } from './checker.ts';
 import { formatDate, monthIndex, parseDate, parsePrice, upcomingMonths } from './dates.ts';
 import type { Store, Watch } from './db.ts';
@@ -7,14 +8,16 @@ import type { Incoming, InlineButton, Messenger } from './telegram.ts';
 
 export const MENU = {
   track: '✈️ Новое отслеживание',
+  explore: '🌍 Куда угодно',
   list: '📋 Мои отслеживания',
   check: '🔄 Проверить цены',
   help: '❓ Помощь',
 };
-export const MENU_KEYBOARD = [[MENU.track], [MENU.list, MENU.check], [MENU.help]];
+export const MENU_KEYBOARD = [[MENU.track, MENU.explore], [MENU.list, MENU.check], [MENU.help]];
 
 export const BOT_COMMANDS = [
   { command: 'track', description: 'Новое отслеживание' },
+  { command: 'anywhere', description: 'Самые дешёвые направления' },
   { command: 'list', description: 'Мои отслеживания' },
   { command: 'check', description: 'Проверить цены сейчас' },
   { command: 'cancel', description: 'Отменить ввод' },
@@ -26,6 +29,7 @@ export const HELP = [
   '',
   '<b>Как начать</b>',
   `Нажмите «${MENU.track}» — я спрошу, откуда, куда и когда вы летите.`,
+  `Не знаете, куда лететь? «${MENU.explore}» покажет самые дешёвые направления из вашего города.`,
   '',
   'Или напишите всё одним сообщением, например:',
   '• <i>Шымкент Астана ноябрь</i>',
@@ -49,10 +53,13 @@ export interface Draft {
   options?: Place[];
   /** Set when changing one field of an existing watch instead of creating one. */
   edit?: { watchId: number; step: Step };
+  /** Set when searching the cheapest destinations: only origin and month are asked. */
+  explore?: boolean;
 }
 
 export function nextStep(draft: Draft): Step | null {
   if (!draft.origin) return 'origin';
+  if (draft.explore) return draft.departDate ? null : 'depart';
   if (!draft.destination) return 'destination';
   if (!draft.departDate) return 'depart';
   if (draft.returnDate === undefined) return 'return';
@@ -86,6 +93,7 @@ export class Conversation {
   private readonly checker: PriceChecker;
   private readonly messenger: Messenger;
   private readonly places: PlaceSearch;
+  private readonly explore: ExploreSource;
   private readonly currency: string;
   private readonly today: () => string;
 
@@ -94,6 +102,7 @@ export class Conversation {
     checker: PriceChecker,
     messenger: Messenger,
     places: PlaceSearch,
+    explore: ExploreSource,
     currency: string,
     today: () => string = () => new Date().toISOString().slice(0, 10),
   ) {
@@ -101,6 +110,7 @@ export class Conversation {
     this.checker = checker;
     this.messenger = messenger;
     this.places = places;
+    this.explore = explore;
     this.currency = currency;
     this.today = today;
   }
@@ -129,6 +139,7 @@ export class Conversation {
     if (command === '/track' || text === MENU.track) {
       return args.length > 0 && command ? this.quickStart(chatId, args.join(' ')) : this.startDraft(chatId);
     }
+    if (command === '/anywhere' || text === MENU.explore) return this.advance(chatId, { explore: true });
     if (command === '/list' || text === MENU.list) return this.list(chatId);
     if (command === '/check' || text === MENU.check) return this.checkNow(chatId);
     if (command === '/remove') return this.remove(chatId, Number(args[0]?.replace('#', '')));
@@ -231,7 +242,7 @@ export class Conversation {
   private async advance(chatId: number, draft: Draft): Promise<void> {
     if (draft.edit) return this.applyEdit(chatId, draft);
     const step = nextStep(draft);
-    if (!step) return this.finish(chatId, draft);
+    if (!step) return draft.explore ? this.showCheapest(chatId, draft) : this.finish(chatId, draft);
     await this.store.setDraft(chatId, draft);
     return this.ask(chatId, draft, step);
   }
@@ -240,16 +251,21 @@ export class Conversation {
     const route = draft.origin && draft.destination ? `${draft.origin.name} → ${draft.destination.name}` : '';
     switch (step) {
       case 'origin':
-        return this.send(chatId, '✈️ <b>Откуда летим?</b>\nНапишите город, например: <i>Алматы</i>', [[CANCEL]]);
+        return this.send(
+          chatId,
+          draft.explore
+            ? '🌍 <b>Откуда летим?</b>\nНапишите город — покажу самые дешёвые направления из него.'
+            : '✈️ <b>Откуда летим?</b>\nНапишите город, например: <i>Алматы</i>',
+          [[CANCEL]],
+        );
       case 'destination':
         return this.send(chatId, `Из города ${draft.origin!.name}. <b>Куда летим?</b>\nНапишите город, например: <i>Стамбул</i>`, [[CANCEL]]);
       case 'depart': {
         const months = upcomingMonths(this.today()).map((m) => ({ text: m.label, data: `month:${m.value}` }));
-        return this.send(
-          chatId,
-          `${route}. <b>Когда летим?</b>\nВыберите месяц — найду самый дешёвый день. Или напишите точную дату, например <i>20.11</i>`,
-          [...rows(months, 3), [CANCEL]],
-        );
+        const question = draft.explore
+          ? `Из города ${draft.origin!.name}. <b>Когда летим?</b>\nВыберите месяц или напишите дату, например <i>20.11</i>`
+          : `${route}. <b>Когда летим?</b>\nВыберите месяц — найду самый дешёвый день. Или напишите точную дату, например <i>20.11</i>`;
+        return this.send(chatId, question, [...rows(months, 3), [CANCEL]]);
       }
       case 'return':
         return this.send(
@@ -318,6 +334,68 @@ export class Conversation {
       console.error(`Initial check of watch #${watch.id} failed:`, error);
       await this.send(chatId, 'Не получилось узнать цену прямо сейчас — попробую при следующей проверке.');
     }
+  }
+
+  // ---- cheapest destinations ----
+
+  private async cityName(code: string): Promise<string> {
+    try {
+      const places = await this.places(code);
+      return places.find((p) => p.code === code)?.name ?? code;
+    } catch {
+      return code;
+    }
+  }
+
+  private async showCheapest(chatId: number, draft: Draft): Promise<void> {
+    await this.store.clearDraft(chatId);
+    const origin = draft.origin!;
+    const when = formatDate(draft.departDate!);
+    let offers: DestinationOffer[];
+    try {
+      offers = await this.explore(origin.code, draft.departDate!);
+    } catch (error) {
+      console.error('Explore search failed:', error);
+      return this.send(chatId, 'Не получилось загрузить цены 😕 Попробуйте чуть позже.');
+    }
+    if (offers.length === 0) {
+      return this.send(chatId, `Из города ${origin.name} на ${when} билетов не нашлось. Попробуйте другой месяц.`, [
+        [{ text: MENU.explore, data: 'explore' }],
+      ]);
+    }
+
+    const names = await Promise.all(offers.map((offer) => this.cityName(offer.destination)));
+    const lines = offers.map((offer, i) => {
+      const [date = ''] = offer.departureAt.split('T');
+      const transfers = offer.transfers === 0 ? 'прямой' : `пересадок: ${offer.transfers}`;
+      return `<b>${i + 1}. ${names[i]}</b> — ${formatPrice(offer.price, this.currency)}\n     ${formatDate(date)} · ${transfers} · <a href="${offer.link}">купить</a>`;
+    });
+    const follow = offers.slice(0, 6).map((offer, i) => ({
+      text: `🔔 ${names[i]}`,
+      data: `follow:${origin.code}.${offer.destination}.${draft.departDate}`,
+    }));
+    await this.send(
+      chatId,
+      `🌍 <b>Самые дешёвые билеты из города ${origin.name}</b>, ${when}, в одну сторону:\n\n${lines.join('\n\n')}\n\nНажмите 🔔, чтобы я следил за ценой на это направление.`,
+      rows(follow, 2),
+    );
+  }
+
+  private async follow(chatId: number, value: string): Promise<void> {
+    const [origin, destination, departDate] = value.split('.');
+    if (!origin || !destination || !departDate) return;
+    const [originName, destinationName] = await Promise.all([this.cityName(origin), this.cityName(destination)]);
+    const watch = await this.store.addWatch({
+      chatId,
+      origin,
+      destination,
+      originName,
+      destinationName,
+      departDate,
+      returnDate: null,
+      maxPrice: null,
+    });
+    await this.created(chatId, watch);
   }
 
   // ---- editing ----
@@ -438,6 +516,8 @@ export class Conversation {
     const [action = '', value = ''] = data.split(':');
     if (action === 'cancel') return this.cancel(chatId);
     if (action === 'new') return this.startDraft(chatId);
+    if (action === 'explore') return this.advance(chatId, { explore: true });
+    if (action === 'follow') return this.follow(chatId, value);
     if (action === 'del') return this.remove(chatId, Number(value));
     if (action === 'edit') return this.showEditMenu(chatId, Number(value));
     if (action === 'editf') {

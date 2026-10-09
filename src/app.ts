@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createAviasalesSource, type PriceSource } from './aviasales.ts';
+import { createAviasalesSource, createExploreSource, type ExploreSource, type PriceSource } from './aviasales.ts';
 import { PriceChecker } from './checker.ts';
 import { BOT_COMMANDS, Conversation } from './commands.ts';
 import type { Config } from './config.ts';
@@ -18,6 +18,7 @@ export interface AppDeps {
   fetchFn?: typeof fetch;
   priceSource?: PriceSource;
   placeSearch?: PlaceSearch;
+  exploreSource?: ExploreSource;
   today?: () => string;
 }
 
@@ -27,7 +28,8 @@ export function createApp(config: Config, deps: AppDeps): App {
   const source = deps.priceSource ?? createAviasalesSource(config.travelpayoutsToken, config.currency, deps.fetchFn);
   const places = deps.placeSearch ?? createPlaceSearch(deps.fetchFn);
   const checker = new PriceChecker(store, source, bot, config.currency);
-  const conversation = new Conversation(store, checker, bot, places, config.currency, deps.today);
+  const explore = deps.exploreSource ?? createExploreSource(config.travelpayoutsToken, config.currency, deps.fetchFn);
+  const conversation = new Conversation(store, checker, bot, places, explore, config.currency, deps.today);
 
   return {
     bot,

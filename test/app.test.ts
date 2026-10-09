@@ -36,7 +36,7 @@ describe('HTTP handler', () => {
     telegram = telegramFetch();
     const app = createApp(
       { ...config, ...overrides },
-      { query: memoryQuery(), fetchFn: telegram.fetchFn, priceSource: scriptedSource(prices), placeSearch: fakePlaces },
+      { query: memoryQuery(), fetchFn: telegram.fetchFn, priceSource: scriptedSource(prices), placeSearch: fakePlaces, exploreSource: async () => [] },
     );
     handle = createHttpHandler(app, SECRET);
   };
