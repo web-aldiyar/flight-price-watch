@@ -52,6 +52,8 @@ const SCHEMA = [
     draft      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`,
+  // Left over from the removed "Hot tickets" feature.
+  `DROP TABLE IF EXISTS hunts, hunt_prices, cities`,
 ];
 
 // Casts keep row values driver-independent (BIGINT and timestamps come back as strings or objects otherwise).
