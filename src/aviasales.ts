@@ -1,8 +1,17 @@
+/** Length of a round trip without fixed dates, in days between the flights. */
+export interface TripLength {
+  minDays: number;
+  maxDays: number;
+}
+
 export interface PriceQuery {
   origin: string;
   destination: string;
+  /** YYYY-MM-DD, YYYY-MM or "any". */
   departDate: string;
   returnDate: string | null;
+  /** Round trip with a flexible return date. */
+  trip: TripLength | null;
 }
 
 export interface Offer {
@@ -31,6 +40,12 @@ interface ApiResponse {
   error?: string;
 }
 
+/** Days between the outbound and return departure dates, as printed on the ticket. */
+export const tripDays = (offer: Pick<Offer, 'departureAt' | 'returnAt'>): number =>
+  offer.returnAt
+    ? Math.round((Date.parse(offer.returnAt.slice(0, 10)) - Date.parse(offer.departureAt.slice(0, 10))) / 86_400_000)
+    : 0;
+
 const API_URL = 'https://api.travelpayouts.com/aviasales/v3/prices_for_dates';
 
 /**
@@ -42,12 +57,14 @@ export function createAviasalesSource(token: string, currency: string, fetchFn: 
     const params = new URLSearchParams({
       origin: query.origin,
       destination: query.destination,
-      departure_at: query.departDate,
-      one_way: String(query.returnDate === null),
+      one_way: String(query.returnDate === null && query.trip === null),
       sorting: 'price',
       currency,
-      limit: '1',
+      // A flexible round trip is picked by its length from many tickets.
+      limit: query.trip ? '1000' : '1',
     });
+    // Without a date the API returns the cheapest tickets on any upcoming day.
+    if (query.departDate !== 'any') params.set('departure_at', query.departDate);
     if (query.returnDate) params.set('return_at', query.returnDate);
 
     const response = await fetchFn(`${API_URL}?${params}`, { headers: { 'X-Access-Token': token } });
@@ -57,15 +74,20 @@ export function createAviasalesSource(token: string, currency: string, fetchFn: 
     const body = (await response.json()) as ApiResponse;
     if (!body.success) throw new Error(`Aviasales API error: ${body.error ?? 'unknown'}`);
 
-    const ticket = body.data?.[0];
-    if (!ticket) return null;
-    return {
-      price: ticket.price,
-      airline: ticket.airline,
-      departureAt: ticket.departure_at,
-      returnAt: ticket.return_at ?? null,
-      transfers: ticket.transfers,
-      link: `https://www.aviasales.ru${ticket.link}`,
-    };
+    const offers = (body.data ?? []).map(
+      (ticket): Offer => ({
+        price: ticket.price,
+        airline: ticket.airline,
+        departureAt: ticket.departure_at,
+        returnAt: ticket.return_at ?? null,
+        transfers: ticket.transfers,
+        link: `https://www.aviasales.ru${ticket.link}`,
+      }),
+    );
+    const { trip } = query;
+    const [offer] = trip
+      ? offers.filter((o) => o.returnAt && tripDays(o) >= trip.minDays && tripDays(o) <= trip.maxDays)
+      : offers;
+    return offer ?? null;
   };
 }

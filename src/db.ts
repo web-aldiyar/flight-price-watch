@@ -1,3 +1,5 @@
+import type { TripLength } from './aviasales.ts';
+
 export interface Watch {
   id: number;
   chatId: number;
@@ -7,10 +9,12 @@ export interface Watch {
   /** City names for display; null for watches created with bare codes. */
   originName: string | null;
   destinationName: string | null;
-  /** YYYY-MM-DD or YYYY-MM (whole month). */
+  /** YYYY-MM-DD, YYYY-MM (whole month) or "any" (any day within a year). */
   departDate: string;
-  /** YYYY-MM-DD or YYYY-MM; null for one-way. */
+  /** YYYY-MM-DD or YYYY-MM; null for one-way or a flexible round trip. */
   returnDate: string | null;
+  /** Round trip without fixed dates: its length; null otherwise. */
+  trip: TripLength | null;
   /** Alert only when the price is at or below this value. */
   maxPrice: number | null;
   lastPrice: number | null;
@@ -19,7 +23,7 @@ export interface Watch {
 
 export type NewWatch = Pick<
   Watch,
-  'chatId' | 'origin' | 'destination' | 'originName' | 'destinationName' | 'departDate' | 'returnDate' | 'maxPrice'
+  'chatId' | 'origin' | 'destination' | 'originName' | 'destinationName' | 'departDate' | 'returnDate' | 'trip' | 'maxPrice'
 >;
 
 /** Runs one parameterized SQL statement and returns its rows (Neon HTTP driver or PGlite). */
@@ -52,13 +56,16 @@ const SCHEMA = [
     draft      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`,
+  // Round trip without fixed dates: the trip length in days.
+  `ALTER TABLE watches ADD COLUMN IF NOT EXISTS min_days INTEGER`,
+  `ALTER TABLE watches ADD COLUMN IF NOT EXISTS max_days INTEGER`,
   // Left over from the removed "Hot tickets" feature.
   `DROP TABLE IF EXISTS hunts, hunt_prices, cities`,
 ];
 
 // Casts keep row values driver-independent (BIGINT and timestamps come back as strings or objects otherwise).
 const COLUMNS = `id, chat_id::float8 AS chat_id, origin, destination, origin_name, destination_name, depart_date, return_date,
-  max_price, last_price, created_at::text AS created_at`;
+  min_days, max_days, max_price, last_price, created_at::text AS created_at`;
 
 const toWatch = (row: Record<string, unknown>): Watch => ({
   id: Number(row['id']),
@@ -69,6 +76,7 @@ const toWatch = (row: Record<string, unknown>): Watch => ({
   destinationName: (row['destination_name'] as string | null) ?? null,
   departDate: String(row['depart_date']),
   returnDate: (row['return_date'] as string | null) ?? null,
+  trip: row['min_days'] == null ? null : { minDays: Number(row['min_days']), maxDays: Number(row['max_days']) },
   maxPrice: row['max_price'] == null ? null : Number(row['max_price']),
   lastPrice: row['last_price'] == null ? null : Number(row['last_price']),
   createdAt: String(row['created_at']),
@@ -96,8 +104,9 @@ export class Store {
 
   async addWatch(watch: NewWatch): Promise<Watch> {
     const [row] = await this.sql(
-      `INSERT INTO watches (chat_id, origin, destination, origin_name, destination_name, depart_date, return_date, max_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${COLUMNS}`,
+      `INSERT INTO watches (chat_id, origin, destination, origin_name, destination_name, depart_date, return_date, max_price,
+         min_days, max_days)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${COLUMNS}`,
       [
         watch.chatId,
         watch.origin,
@@ -107,6 +116,8 @@ export class Store {
         watch.departDate,
         watch.returnDate,
         watch.maxPrice,
+        watch.trip?.minDays ?? null,
+        watch.trip?.maxDays ?? null,
       ],
     );
     return toWatch(row!);
@@ -129,7 +140,7 @@ export class Store {
   ): Promise<Watch | null> {
     const [row] = await this.sql(
       `UPDATE watches SET origin = $3, destination = $4, origin_name = $5, destination_name = $6,
-         depart_date = $7, return_date = $8, max_price = $9,
+         depart_date = $7, return_date = $8, max_price = $9, min_days = $11, max_days = $12,
          last_price = CASE WHEN $10::boolean THEN NULL ELSE last_price END
        WHERE id = $1 AND chat_id = $2 RETURNING ${COLUMNS}`,
       [
@@ -143,6 +154,8 @@ export class Store {
         watch.returnDate,
         watch.maxPrice,
         resetPrices,
+        watch.trip?.minDays ?? null,
+        watch.trip?.maxDays ?? null,
       ],
     );
     if (!row) return null;

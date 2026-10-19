@@ -247,4 +247,70 @@ describe('Conversation', () => {
       expect((await store.listWatches(CHAT))[0]).toMatchObject({ origin: 'ALA' });
     });
   });
+
+  describe('flexible dates', () => {
+    it('offers any date within a year and twelve months', async () => {
+      await say('Алматы Стамбул');
+      expect(messenger.buttons[0]).toBe('month:any');
+      expect(messenger.buttons).toContain('month:2027-09');
+      expect(messenger.buttons).not.toContain('month:2027-10');
+    });
+
+    it('watches a round trip on any date without fixed dates', async () => {
+      setup([90000]);
+      await say('Алматы Стамбул');
+      await press('month:any');
+      expect(messenger.last?.text).toContain('Вылет: любая дата в течение года');
+      expect(messenger.buttons).toEqual(['flexible', 'oneway', 'cancel']);
+
+      await press('flexible');
+      expect(messenger.last?.text).toContain('На сколько дней летим');
+      expect(messenger.buttons).toEqual(['len:2-4', 'len:5-9', 'len:10-16', 'len:3-14', 'cancel']);
+
+      await press('len:5-9');
+      await press('anyprice');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({
+        departDate: 'any',
+        returnDate: null,
+        trip: { minDays: 5, maxDays: 9 },
+        lastPrice: 90000,
+      });
+      expect(texts().at(-2)).toContain('Алматы → Стамбул, любая дата в течение года, туда-обратно на 5–9 дней');
+    });
+
+    it('accepts a typed trip length after a month', async () => {
+      await say('Алматы Стамбул декабрь');
+      await say('любые даты'); // not understood: still the return question
+      await press('flexible');
+      await say('от 7 до 10');
+      expect(await store.getDraft(CHAT)).toMatchObject({ departDate: '2026-12', flexible: true, trip: { minDays: 7, maxDays: 10 } });
+      expect(messenger.last?.text).toContain('Когда вам написать');
+    });
+
+    it('asks only for buttons when the departure is any date', async () => {
+      await say('Алматы Стамбул');
+      await say('любая');
+      await say('05.01');
+      expect(messenger.last?.text).toContain('тоже без точной даты');
+    });
+
+    it('switches a watch to flexible dates when editing', async () => {
+      setup([50000, 60000]);
+      await say('Алматы Стамбул 20.12 обратно 05.01');
+      await press('anyprice');
+      const id = (await store.listWatches(CHAT))[0]!.id;
+
+      await press(`editf:${id}.depart`);
+      await press('month:any');
+      // The fixed return date no longer fits: asked again.
+      expect(messenger.last?.text).toContain('Нужен обратный билет');
+      await press('flexible');
+      await press('len:10-16');
+      expect((await store.listWatches(CHAT))[0]).toMatchObject({
+        departDate: 'any',
+        returnDate: null,
+        trip: { minDays: 10, maxDays: 16 },
+      });
+    });
+  });
 });

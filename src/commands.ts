@@ -1,7 +1,8 @@
 import type { PriceChecker } from './checker.ts';
-import { formatDate, monthIndex, parseDate, parsePrice, upcomingMonths } from './dates.ts';
+import type { TripLength } from './aviasales.ts';
+import { ANY_DATE, formatDate, monthIndex, parseDate, parsePrice, upcomingMonths } from './dates.ts';
 import type { Store, Watch } from './db.ts';
-import { describeRoute, formatPrice } from './format.ts';
+import { describeRoute, describeTripLength, formatPrice } from './format.ts';
 import type { Place, PlaceSearch } from './places.ts';
 import type { Incoming, InlineButton, Messenger } from './telegram.ts';
 
@@ -34,15 +35,18 @@ export const HELP = [
   'Цены проверяю каждые 15 минут и пишу, только когда стало дешевле.',
 ].join('\n');
 
-export type Step = 'origin' | 'destination' | 'depart' | 'return' | 'price';
+export type Step = 'origin' | 'destination' | 'depart' | 'return' | 'length' | 'price';
 
 /** An unfinished "new watch" or "edit watch" dialog, saved between messages. */
 export interface Draft {
   origin?: Place;
   destination?: Place;
   departDate?: string;
-  /** null = one way; undefined = not asked yet. */
+  /** null = one way or a flexible round trip; undefined = not asked yet. */
   returnDate?: string | null;
+  /** Round trip without fixed dates: its length is asked next. */
+  flexible?: boolean;
+  trip?: TripLength;
   /** null = alert on any drop; undefined = not asked yet. */
   maxPrice?: number | null;
   /** City candidates shown as buttons for the current step. */
@@ -56,6 +60,7 @@ export function nextStep(draft: Draft): Step | null {
   if (!draft.destination) return 'destination';
   if (!draft.departDate) return 'depart';
   if (draft.returnDate === undefined) return 'return';
+  if (draft.flexible && !draft.trip) return 'length';
   if (draft.maxPrice === undefined) return 'price';
   return null;
 }
@@ -72,6 +77,14 @@ const EDIT_FIELDS: { step: Step; label: string }[] = [
 ];
 
 const CANCEL: InlineButton = { text: '✖️ Отмена', data: 'cancel' };
+/** Choices for a round trip without fixed dates. */
+const TRIP_LENGTHS: TripLength[] = [
+  { minDays: 2, maxDays: 4 },
+  { minDays: 5, maxDays: 9 },
+  { minDays: 10, maxDays: 16 },
+  { minDays: 3, maxDays: 14 },
+];
+const ANY_DAY = new Set(['любая', 'любой', 'любое', 'любая дата', 'любой день', 'не важно', 'неважно', 'когда угодно']);
 const ONE_WAY = new Set(['нет', 'не нужен', 'не надо', 'в одну сторону', 'одну сторону', 'туда']);
 const ANY_PRICE = new Set(['нет', 'любая', 'любой', 'без', 'без лимита', 'не важно', 'неважно', 'при любом']);
 const FILLER_WORDS = new Set([
@@ -169,14 +182,14 @@ export class Conversation {
         ]);
       }
       case 'depart': {
-        const date = parseDate(text, this.today());
+        const date = ANY_DAY.has(lower) ? ANY_DATE : parseDate(text, this.today());
         if (!date) return this.send(chatId, 'Не понял дату 🤔 Напишите, например, <i>20.11</i> или <i>ноябрь</i>.', [[CANCEL]]);
         return this.setDepart(chatId, draft, date);
       }
       case 'return': {
-        if (ONE_WAY.has(lower)) {
-          draft.returnDate = null;
-          return this.advance(chatId, draft);
+        if (ONE_WAY.has(lower)) return this.setReturn(chatId, draft, null);
+        if (draft.departDate === ANY_DATE) {
+          return this.send(chatId, 'При любой дате вылета обратный билет — тоже без точной даты. Нажмите кнопку.', this.returnButtons());
         }
         const date = parseDate(text, this.today());
         if (!date) {
@@ -185,7 +198,15 @@ export class Conversation {
         if (date < draft.departDate!) {
           return this.send(chatId, 'Дата возвращения раньше вылета. Напишите другую дату.', this.returnButtons());
         }
-        draft.returnDate = date;
+        return this.setReturn(chatId, draft, date);
+      }
+      case 'length': {
+        const m = lower.match(/^(?:от\s*)?(\d{1,2})\s*(?:-|–|—|до)\s*(\d{1,2})/);
+        const [min, max] = m ? [Number(m[1]), Number(m[2])] : [0, 0];
+        if (!m || min < 1 || max < min || max > 30) {
+          return this.send(chatId, 'Напишите, например, <i>7-10</i> (дней) или нажмите кнопку.', this.lengthButtons());
+        }
+        draft.trip = { minDays: min, maxDays: max };
         return this.advance(chatId, draft);
       }
       case 'price': {
@@ -203,8 +224,19 @@ export class Conversation {
     }
   }
 
+  /** null = one way, "flexible" = round trip without fixed dates, otherwise the return date. */
+  private async setReturn(chatId: number, draft: Draft, value: string | null): Promise<void> {
+    draft.flexible = value === 'flexible';
+    draft.returnDate = value === 'flexible' ? null : value;
+    delete draft.trip;
+    return this.advance(chatId, draft);
+  }
+
   private async setDepart(chatId: number, draft: Draft, date: string): Promise<void> {
-    if (draft.returnDate && draft.returnDate < date) {
+    if (date === ANY_DATE && draft.returnDate) {
+      // A fixed return date makes no sense without a fixed departure: ask again.
+      delete draft.returnDate;
+    } else if (draft.returnDate && draft.returnDate < date) {
       return this.send(
         chatId,
         `Обратный вылет у вас ${formatDate(draft.returnDate)} — дата вылета должна быть раньше. Напишите другую дату.`,
@@ -229,8 +261,12 @@ export class Conversation {
 
   /** Saves the draft and asks the next question, or saves the watch when everything is known. */
   private async advance(chatId: number, draft: Draft): Promise<void> {
-    if (draft.edit) return this.applyEdit(chatId, draft);
     const step = nextStep(draft);
+    if (draft.edit) {
+      // A change can open a new question, e.g. the trip length after "without fixed dates".
+      if (!step) return this.applyEdit(chatId, draft);
+      draft.edit.step = step;
+    }
     if (!step) return this.finish(chatId, draft);
     await this.store.setDraft(chatId, draft);
     return this.ask(chatId, draft, step);
@@ -244,18 +280,26 @@ export class Conversation {
       case 'destination':
         return this.send(chatId, `Из города ${draft.origin!.name}. <b>Куда летим?</b>\nНапишите город, например: <i>Стамбул</i>`, [[CANCEL]]);
       case 'depart': {
-        const months = upcomingMonths(this.today()).map((m) => ({ text: m.label, data: `month:${m.value}` }));
+        const months = upcomingMonths(this.today(), 12).map((m) => ({ text: m.label, data: `month:${m.value}` }));
         return this.send(
           chatId,
-          `${route}. <b>Когда летим?</b>\nВыберите месяц — найду самый дешёвый день. Или напишите точную дату, например <i>20.11</i>`,
-          [...rows(months, 3), [CANCEL]],
+          `${route}. <b>Когда летим?</b>\nВыберите месяц — найду самый дешёвый день. Или любую дату в течение года, или напишите точную, например <i>20.11</i>`,
+          [[{ text: '🗓 Любая дата в течение года', data: `month:${ANY_DATE}` }], ...rows(months, 3), [CANCEL]],
         );
       }
       case 'return':
         return this.send(
           chatId,
-          `Вылет: ${formatDate(draft.departDate!)}. <b>Нужен обратный билет?</b>\nНапишите дату возвращения, например <i>05.12</i>, или нажмите кнопку.`,
+          draft.departDate === ANY_DATE
+            ? `Вылет: ${formatDate(ANY_DATE)}. <b>Нужен обратный билет?</b>`
+            : `Вылет: ${formatDate(draft.departDate!)}. <b>Нужен обратный билет?</b>\nНапишите дату возвращения, например <i>05.12</i>, или нажмите кнопку.`,
           this.returnButtons(),
+        );
+      case 'length':
+        return this.send(
+          chatId,
+          '🔄 <b>На сколько дней летим?</b>\nНайду самый дешёвый вариант туда-обратно такой длины. Нажмите кнопку или напишите, например, <i>7-10</i>',
+          this.lengthButtons(),
         );
       case 'price': {
         const current = draft.edit && draft.maxPrice ? `Сейчас: не дороже ${formatPrice(draft.maxPrice, this.currency)}.\n` : '';
@@ -269,7 +313,12 @@ export class Conversation {
   }
 
   private returnButtons(): InlineButton[][] {
-    return [[{ text: '➡️ Только туда', data: 'oneway' }], [CANCEL]];
+    return [[{ text: '🔄 Туда-обратно, без точных дат', data: 'flexible' }], [{ text: '➡️ Только туда', data: 'oneway' }], [CANCEL]];
+  }
+
+  private lengthButtons(): InlineButton[][] {
+    const buttons = TRIP_LENGTHS.map((t) => ({ text: describeTripLength(t), data: `len:${t.minDays}-${t.maxDays}` }));
+    return [...rows(buttons, 2), [CANCEL]];
   }
 
   private priceButtons(): InlineButton[][] {
@@ -286,6 +335,7 @@ export class Conversation {
       destinationName: draft.destination!.name,
       departDate: draft.departDate!,
       returnDate: draft.returnDate ?? null,
+      trip: draft.flexible ? draft.trip! : null,
       maxPrice: draft.maxPrice ?? null,
     });
     await this.created(chatId, watch);
@@ -342,6 +392,7 @@ export class Conversation {
       destination: { code: watch.destination, name: watch.destinationName ?? watch.destination, country: '' },
       departDate: watch.departDate,
       returnDate: watch.returnDate,
+      ...(watch.trip ? { flexible: true, trip: watch.trip } : {}),
       maxPrice: watch.maxPrice,
       edit: { watchId: id, step },
     };
@@ -364,6 +415,7 @@ export class Conversation {
         destinationName: draft.destination!.name,
         departDate: draft.departDate!,
         returnDate: draft.returnDate ?? null,
+        trip: draft.flexible ? draft.trip! : null,
         maxPrice: draft.maxPrice ?? null,
       },
       resetPrices,
@@ -457,8 +509,15 @@ export class Conversation {
     } else if (action === 'month' && step === 'depart') {
       return this.setDepart(chatId, draft, value);
     } else if (action === 'oneway' && step === 'return') {
-      draft.returnDate = null;
-      return this.advance(chatId, draft);
+      return this.setReturn(chatId, draft, null);
+    } else if (action === 'flexible' && step === 'return') {
+      return this.setReturn(chatId, draft, 'flexible');
+    } else if (action === 'len' && step === 'length') {
+      const trip = TRIP_LENGTHS.find((t) => `${t.minDays}-${t.maxDays}` === value);
+      if (trip) {
+        draft.trip = trip;
+        return this.advance(chatId, draft);
+      }
     } else if (action === 'anyprice' && step === 'price') {
       draft.maxPrice = null;
       return this.advance(chatId, draft);

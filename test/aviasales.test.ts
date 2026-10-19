@@ -32,6 +32,7 @@ describe('createAviasalesSource', () => {
       destination: 'IST',
       departDate: '2026-12-20',
       returnDate: '2027-01-05',
+      trip: null,
     });
 
     const params = new URL(url).searchParams;
@@ -54,12 +55,44 @@ describe('createAviasalesSource', () => {
   it('returns null when there are no tickets', async () => {
     const fetchFn = (async () => jsonResponse({ success: true, data: [] })) as typeof fetch;
     const source = createAviasalesSource('t', 'rub', fetchFn);
-    expect(await source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null })).toBeNull();
+    expect(await source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null, trip: null })).toBeNull();
   });
 
   it('throws on HTTP errors', async () => {
     const fetchFn = (async () => jsonResponse({}, 401)) as typeof fetch;
     const source = createAviasalesSource('bad', 'rub', fetchFn);
-    await expect(source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null })).rejects.toThrow('401');
+    await expect(source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null, trip: null })).rejects.toThrow('401');
+  });
+
+  it('finds the cheapest round trip of a given length on any date', async () => {
+    let url = '';
+    const ticket = (price: number, returnDay: number) => ({
+      price,
+      airline: 'KC',
+      departure_at: '2026-11-12T23:00:00+05:00',
+      return_at: `2026-11-${returnDay}T01:00:00+03:00`,
+      transfers: 0,
+      link: '/search/ALA1211IST1',
+    });
+    const fetchFn = (async (input: string) => {
+      url = input;
+      // 1 day, 18 days, 7 days.
+      return jsonResponse({ success: true, data: [ticket(30000, 13), ticket(35000, 30), ticket(40000, 19)] });
+    }) as typeof fetch;
+
+    const offer = await createAviasalesSource('t', 'kzt', fetchFn)({
+      origin: 'ALA',
+      destination: 'IST',
+      departDate: 'any',
+      returnDate: null,
+      trip: { minDays: 5, maxDays: 9 },
+    });
+
+    const params = new URL(url).searchParams;
+    expect(params.has('departure_at')).toBe(false);
+    expect(params.has('return_at')).toBe(false);
+    expect(params.get('one_way')).toBe('false');
+    expect(params.get('limit')).toBe('1000');
+    expect(offer).toMatchObject({ price: 40000, returnAt: '2026-11-19T01:00:00+03:00' });
   });
 });

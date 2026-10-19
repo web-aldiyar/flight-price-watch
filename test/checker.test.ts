@@ -12,6 +12,7 @@ const watch = (overrides: Partial<Watch> = {}): Watch => ({
   destinationName: 'Стамбул',
   departDate: '2026-12-20',
   returnDate: null,
+  trip: null,
   maxPrice: null,
   lastPrice: null,
   createdAt: '2026-10-09 00:00:00',
@@ -41,7 +42,7 @@ describe('PriceChecker.checkAll', () => {
   });
 
   it('alerts only on drops and keeps price history', async () => {
-    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', originName: 'Алматы', destinationName: 'Стамбул', departDate: '2026-12', returnDate: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', originName: 'Алматы', destinationName: 'Стамбул', departDate: '2026-12', returnDate: null, trip: null, maxPrice: null });
     const checker = new PriceChecker(store, scriptedSource([50000, 55000, 48000]), messenger, 'kzt');
 
     await checker.checkAll();
@@ -56,8 +57,8 @@ describe('PriceChecker.checkAll', () => {
   });
 
   it('continues with other watches when one fails', async () => {
-    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', originName: 'Алматы', destinationName: 'Стамбул', departDate: '2026-12', returnDate: null, maxPrice: null });
-    await store.addWatch({ chatId: 7, origin: 'NQZ', destination: 'DXB', originName: null, destinationName: null, departDate: '2026-12', returnDate: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'ALA', destination: 'IST', originName: 'Алматы', destinationName: 'Стамбул', departDate: '2026-12', returnDate: null, trip: null, maxPrice: null });
+    await store.addWatch({ chatId: 7, origin: 'NQZ', destination: 'DXB', originName: null, destinationName: null, departDate: '2026-12', returnDate: null, trip: null, maxPrice: null });
     const source = async (query: { origin: string }) => {
       if (query.origin === 'ALA') throw new Error('API down');
       return offer(30000);

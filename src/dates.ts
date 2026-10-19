@@ -12,8 +12,12 @@ export function monthIndex(word: string): number {
   return MONTH_PATTERNS.findIndex((pattern) => pattern.test(word));
 }
 
+/** Departure on any day within the coming year. */
+export const ANY_DATE = 'any';
+
 /** "2026-11" → "ноябрь 2026", "2026-11-20" → "20 ноября 2026". */
 export function formatDate(date: string): string {
+  if (date === ANY_DATE) return 'любая дата в течение года';
   const [year, month, day] = date.split('-').map(Number);
   const index = (month ?? 1) - 1;
   return day ? `${day} ${MONTHS_GENITIVE[index]} ${year}` : `${MONTHS[index]} ${year}`;
