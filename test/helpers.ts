@@ -1,5 +1,5 @@
 import { PGlite } from '@electric-sql/pglite';
-import type { DestinationOffer, Offer, PriceQuery, PriceSource } from '../src/aviasales.ts';
+import type { Offer, PriceQuery, PriceSource } from '../src/aviasales.ts';
 import { Store, type Query } from '../src/db.ts';
 import type { Place, PlaceSearch } from '../src/places.ts';
 import type { Messenger, SendOptions } from '../src/telegram.ts';
@@ -19,15 +19,12 @@ export class FakeMessenger implements Messenger {
 }
 
 const CITIES: Place[] = [
-  { code: 'CIT', name: 'Шымкент', country: 'Казахстан', countryCode: 'KZ' },
-  { code: 'NQZ', name: 'Астана', country: 'Казахстан', countryCode: 'KZ' },
-  { code: 'ALA', name: 'Алматы', country: 'Казахстан', countryCode: 'KZ' },
-  { code: 'IST', name: 'Стамбул', country: 'Турция', countryCode: 'TR' },
-  { code: 'URA', name: 'Уральск', country: 'Казахстан', countryCode: 'KZ' },
-  { code: 'UGC', name: 'Ургенч', country: 'Узбекистан', countryCode: 'UZ' },
-  { code: 'DXB', name: 'Дубай', country: 'ОАЭ', countryCode: 'AE' },
-  { code: 'MOW', name: 'Москва', country: 'Россия', countryCode: 'RU' },
-  { code: 'ROM', name: 'Рим', country: 'Италия', countryCode: 'IT' },
+  { code: 'CIT', name: 'Шымкент', country: 'Казахстан' },
+  { code: 'NQZ', name: 'Астана', country: 'Казахстан' },
+  { code: 'ALA', name: 'Алматы', country: 'Казахстан' },
+  { code: 'IST', name: 'Стамбул', country: 'Турция' },
+  { code: 'URA', name: 'Уральск', country: 'Казахстан' },
+  { code: 'UGC', name: 'Ургенч', country: 'Узбекистан' },
 ];
 
 /** Offline city search: prefix match on name or exact code. */
@@ -51,14 +48,6 @@ export const offer = (price: number): Offer => ({
   returnAt: null,
   transfers: 0,
   link: 'https://www.aviasales.ru/search/ALA2012IST1',
-});
-
-/** A round trip from the explore source. */
-export const trip = (destination: string, price: number, departDate = '2026-12-20', returnDate = '2026-12-27'): DestinationOffer => ({
-  ...offer(price),
-  destination,
-  departureAt: `${departDate}T08:15:00+05:00`,
-  returnAt: `${returnDate}T10:00:00+03:00`,
 });
 
 /** Price source that returns the given prices in order (null = no tickets). */
