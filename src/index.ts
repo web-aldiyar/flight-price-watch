@@ -22,6 +22,8 @@ const runChecks = async () => {
   try {
     const { checked, failed } = await app.checker.checkAll();
     console.log(`Checked ${checked} watches, ${failed} failed`);
+    const hunts = await app.hunter.scanAll();
+    console.log(`Scanned ${hunts.scanned} hunts, ${hunts.failed} failed`);
   } finally {
     checking = false;
   }

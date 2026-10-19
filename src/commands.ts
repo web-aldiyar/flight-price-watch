@@ -1,21 +1,33 @@
-import type { DestinationOffer, ExploreSource } from './aviasales.ts';
 import type { PriceChecker } from './checker.ts';
 import { formatDate, monthIndex, parseDate, parsePrice, upcomingMonths } from './dates.ts';
-import type { Store, Watch } from './db.ts';
+import type { Hunt, HuntOrigin, Store, Watch } from './db.ts';
 import { describeRoute, formatPrice } from './format.ts';
+import {
+  DEAL_DROP,
+  DEFAULT_TRIP,
+  describeTripLength,
+  formatTrip,
+  MAX_ORIGINS,
+  POPULAR_ORIGINS,
+  TRIP_LENGTHS,
+  type Hunter,
+  type Trip,
+} from './hunter.ts';
 import type { Place, PlaceSearch } from './places.ts';
 import type { Incoming, InlineButton, Messenger } from './telegram.ts';
 
 export const MENU = {
+  hunt: '🔥 Охотник за билетами',
   track: '✈️ Новое отслеживание',
   explore: '🌍 Куда угодно',
   list: '📋 Мои отслеживания',
   check: '🔄 Проверить цены',
   help: '❓ Помощь',
 };
-export const MENU_KEYBOARD = [[MENU.track, MENU.explore], [MENU.list, MENU.check], [MENU.help]];
+export const MENU_KEYBOARD = [[MENU.hunt], [MENU.explore, MENU.track], [MENU.list, MENU.check], [MENU.help]];
 
 export const BOT_COMMANDS = [
+  { command: 'hunt', description: 'Охотник за дешёвыми билетами за границу' },
   { command: 'track', description: 'Новое отслеживание' },
   { command: 'anywhere', description: 'Самые дешёвые направления' },
   { command: 'list', description: 'Мои отслеживания' },
@@ -25,13 +37,15 @@ export const BOT_COMMANDS = [
 ];
 
 export const HELP = [
-  'Привет! Я слежу за ценами на авиабилеты и пишу, когда билет дешевеет. ✈️',
+  'Привет! Я помогаю улететь за границу дёшево — куда угодно и когда угодно. ✈️',
   '',
   '<b>Как начать</b>',
-  `Нажмите «${MENU.track}» — я спрошу, откуда, куда и когда вы летите.`,
-  `Хотите за границу, но не знаете куда? «${MENU.explore}» покажет самые дешёвые билеты из вашего города.`,
+  `Нажмите «${MENU.hunt}» и выберите города, из которых можете вылететь. Я буду сам просматривать все направления за границу на любые даты (туда-обратно) и напишу, когда билет станет заметно дешевле обычного.`,
   '',
-  'Или напишите всё одним сообщением, например:',
+  `«${MENU.explore}» — самые дешёвые поездки за границу из города прямо сейчас.`,
+  `«${MENU.track}» — если уже знаете, куда и когда летите: слежу за одним маршрутом.`,
+  '',
+  'Маршрут можно написать и одним сообщением, например:',
   '• <i>Шымкент Астана ноябрь</i>',
   '• <i>Алматы Стамбул 20.12 обратно 05.01 до 150000</i>',
   '',
@@ -55,11 +69,13 @@ export interface Draft {
   edit?: { watchId: number; step: Step };
   /** Set when searching the cheapest trips abroad: only the origin is asked. */
   explore?: boolean;
+  /** Set when adding a departure city to the ticket hunter: only the origin is asked. */
+  hunt?: boolean;
 }
 
 export function nextStep(draft: Draft): Step | null {
   if (!draft.origin) return 'origin';
-  if (draft.explore) return null;
+  if (draft.explore || draft.hunt) return null;
   if (!draft.destination) return 'destination';
   if (!draft.departDate) return 'depart';
   if (draft.returnDate === undefined) return 'return';
@@ -91,26 +107,26 @@ const rows = <T>(items: T[], size: number): T[][] =>
 export class Conversation {
   private readonly store: Store;
   private readonly checker: PriceChecker;
+  private readonly hunter: Hunter;
   private readonly messenger: Messenger;
   private readonly places: PlaceSearch;
-  private readonly explore: ExploreSource;
   private readonly currency: string;
   private readonly today: () => string;
 
   constructor(
     store: Store,
     checker: PriceChecker,
+    hunter: Hunter,
     messenger: Messenger,
     places: PlaceSearch,
-    explore: ExploreSource,
     currency: string,
     today: () => string = () => new Date().toISOString().slice(0, 10),
   ) {
     this.store = store;
     this.checker = checker;
+    this.hunter = hunter;
     this.messenger = messenger;
     this.places = places;
-    this.explore = explore;
     this.currency = currency;
     this.today = today;
   }
@@ -139,6 +155,7 @@ export class Conversation {
     if (command === '/track' || text === MENU.track) {
       return args.length > 0 && command ? this.quickStart(chatId, args.join(' ')) : this.startDraft(chatId);
     }
+    if (command === '/hunt' || text === MENU.hunt) return this.showHunt(chatId);
     if (command === '/anywhere' || text === MENU.explore) return this.advance(chatId, { explore: true });
     if (command === '/list' || text === MENU.list) return this.list(chatId);
     if (command === '/check' || text === MENU.check) return this.checkNow(chatId);
@@ -242,7 +259,10 @@ export class Conversation {
   private async advance(chatId: number, draft: Draft): Promise<void> {
     if (draft.edit) return this.applyEdit(chatId, draft);
     const step = nextStep(draft);
-    if (!step) return draft.explore ? this.showCheapest(chatId, draft) : this.finish(chatId, draft);
+    if (!step) {
+      if (draft.hunt) return this.addHuntOrigin(chatId, draft.origin!);
+      return draft.explore ? this.showCheapest(chatId, draft) : this.finish(chatId, draft);
+    }
     await this.store.setDraft(chatId, draft);
     return this.ask(chatId, draft, step);
   }
@@ -251,6 +271,14 @@ export class Conversation {
     const route = draft.origin && draft.destination ? `${draft.origin.name} → ${draft.destination.name}` : '';
     switch (step) {
       case 'origin':
+        if (draft.hunt) {
+          const popular = POPULAR_ORIGINS.map((o) => ({ text: o.name, data: `hcity:${o.code}` }));
+          return this.send(
+            chatId,
+            '🔥 <b>Откуда можете вылететь?</b>\nНапишите город или выберите ниже. Я буду следить за всеми направлениями за границу из него — на любые даты, туда-обратно — и напишу, когда билет станет заметно дешевле обычного.',
+            [...rows(popular, 3), [CANCEL]],
+          );
+        }
         return this.send(
           chatId,
           draft.explore
@@ -339,78 +367,165 @@ export class Conversation {
 
   // ---- cheapest destinations ----
 
-  /** City by IATA code (null if unknown or the lookup fails). */
-  private async findCity(code: string): Promise<Place | null> {
-    try {
-      return (await this.places(code)).find((p) => p.code === code) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** The cheapest destinations abroad: looks up countries in batches until enough are found. */
-  private async cheapestAbroad(origin: Place, offers: DestinationOffer[], count = 10) {
-    const found: { offer: DestinationOffer; city: Place }[] = [];
-    for (let i = 0; i < offers.length && found.length < count; i += 10) {
-      const batch = offers.slice(i, i + 10);
-      const cities = await Promise.all(batch.map((offer) => this.findCity(offer.destination)));
-      batch.forEach((offer, j) => {
-        const city = cities[j];
-        // Unknown countries are skipped: we cannot tell whether they are abroad.
-        if (city?.countryCode && city.countryCode !== origin.countryCode) found.push({ offer, city });
-      });
-    }
-    return found.slice(0, count);
-  }
-
   private async showCheapest(chatId: number, draft: Draft): Promise<void> {
     await this.store.clearDraft(chatId);
     const origin = draft.origin!;
-    let results: { offer: DestinationOffer; city: Place }[];
+    let trips: Trip[];
     try {
-      results = await this.cheapestAbroad(origin, await this.explore(origin.code));
+      trips = (await this.hunter.trips(origin, DEFAULT_TRIP)).slice(0, 10);
     } catch (error) {
       console.error('Explore search failed:', error);
       return this.send(chatId, 'Не получилось загрузить цены 😕 Попробуйте чуть позже.');
     }
-    if (results.length === 0) {
+    const huntButton = [{ text: `🔥 Ловить скидки из города ${origin.name}`, data: `hfrom:${origin.code}` }];
+    if (trips.length === 0) {
       return this.send(chatId, `Из города ${origin.name} билетов за границу пока не нашлось. Попробуйте соседний крупный город.`, [
         [{ text: MENU.explore, data: 'explore' }],
+        huntButton,
       ]);
     }
 
-    const lines = results.map(({ offer, city }, i) => {
-      const [date = ''] = offer.departureAt.split('T');
-      const transfers = offer.transfers === 0 ? 'прямой' : `пересадок: ${offer.transfers}`;
-      return `<b>${i + 1}. ${city.name}</b>, ${city.country} — ${formatPrice(offer.price, this.currency)}\n     ${formatDate(date)} · ${transfers} · <a href="${offer.link}">купить</a>`;
-    });
-    // Watch the month of the cheapest ticket found.
-    const follow = results.slice(0, 6).map(({ offer, city }) => ({
+    const lines = trips.map((trip, i) => formatTrip(trip, this.currency, `${i + 1}. ${trip.city.name}`));
+    const follow = trips.slice(0, 6).map(({ offer, city }) => ({
       text: `🔔 ${city.name}`,
-      data: `follow:${origin.code}.${offer.destination}.${offer.departureAt.slice(0, 7)}`,
+      data: `follow:${origin.code}.${offer.destination}.${offer.departureAt.slice(0, 10)}.${offer.returnAt!.slice(0, 10)}`,
     }));
     await this.send(
       chatId,
-      `🌍 <b>Самые дешёвые билеты за границу из города ${origin.name}</b> (в одну сторону, ближайшие даты):\n\n${lines.join('\n\n')}\n\nНажмите 🔔, чтобы я следил за ценой на это направление.`,
-      rows(follow, 2),
+      `🌍 <b>Самые дешёвые поездки за границу из города ${origin.name}</b> (туда-обратно на ${describeTripLength(DEFAULT_TRIP)}, ближайшие даты):\n\n${lines.join('\n\n')}\n\nНажмите 🔔, чтобы я следил за ценой на эти даты, или включите охотника — он будет ловить скидки по всем направлениям.`,
+      [...rows(follow, 2), huntButton],
     );
   }
 
   private async follow(chatId: number, value: string): Promise<void> {
-    const [origin, destination, departDate] = value.split('.');
+    // Old buttons carry a month and no return date.
+    const [origin, destination, departDate, returnDate] = value.split('.');
     if (!origin || !destination || !departDate) return;
-    const [from, to] = await Promise.all([this.findCity(origin), this.findCity(destination)]);
+    const cities = await this.hunter.cities([origin, destination]);
     const watch = await this.store.addWatch({
       chatId,
       origin,
       destination,
-      originName: from?.name ?? origin,
-      destinationName: to?.name ?? destination,
+      originName: cities.get(origin)?.name ?? origin,
+      destinationName: cities.get(destination)?.name ?? destination,
       departDate,
-      returnDate: null,
+      returnDate: returnDate ?? null,
       maxPrice: null,
     });
     await this.created(chatId, watch);
+  }
+
+  // ---- ticket hunter ----
+
+  private async showHunt(chatId: number): Promise<void> {
+    await this.store.clearDraft(chatId);
+    const hunt = await this.store.getHunt(chatId);
+    if (!hunt) return this.advance(chatId, { hunt: true });
+
+    const buttons: InlineButton[][] = [
+      [
+        { text: '🔎 Лучшее сейчас', data: 'hbest' },
+        ...(hunt.origins.length < MAX_ORIGINS ? [{ text: '➕ Город', data: 'hadd' }] : []),
+      ],
+      ...rows(
+        hunt.origins.map((o) => ({ text: `✖️ ${o.name}`, data: `hdel:${o.code}` })),
+        3,
+      ),
+      [
+        { text: '📅 Длительность', data: 'hlen' },
+        { text: '⏹ Выключить', data: 'hoff' },
+      ],
+    ];
+    await this.send(
+      chatId,
+      [
+        '🔥 <b>Охотник за билетами включён</b>',
+        `Вылет из: ${hunt.origins.map((o) => o.name).join(', ')}`,
+        `Поездка туда-обратно на ${describeTripLength(hunt)}, любые даты, все страны.`,
+        '',
+        `Проверяю каждые 15 минут и пишу, когда билет дешевле обычного на ${Math.round(DEAL_DROP * 100)}% и больше.`,
+      ].join('\n'),
+      buttons,
+    );
+  }
+
+  private async addHuntOrigin(chatId: number, place: HuntOrigin): Promise<void> {
+    await this.store.clearDraft(chatId);
+    const hunt: Hunt = (await this.store.getHunt(chatId)) ?? { chatId, origins: [], ...DEFAULT_TRIP };
+    if (hunt.origins.some((o) => o.code === place.code)) {
+      await this.send(chatId, `${place.name} уже в списке.`);
+      return this.showHunt(chatId);
+    }
+    if (hunt.origins.length >= MAX_ORIGINS) {
+      await this.send(chatId, `Можно до ${MAX_ORIGINS} городов. Уберите один, чтобы добавить другой.`);
+      return this.showHunt(chatId);
+    }
+    hunt.origins.push({ code: place.code, name: place.name, countryCode: place.countryCode });
+    await this.store.saveHunt(hunt);
+    await this.send(
+      chatId,
+      `✅ <b>Добавил: ${place.name}.</b> Слежу за всеми направлениями за границу из ${hunt.origins.length > 1 ? 'этих городов' : 'этого города'}.\nСейчас посмотрю, что есть…`,
+    );
+    await this.showBest(chatId);
+  }
+
+  /** Scans the hunt now and shows the cheapest trips (the scan itself reports deals). */
+  private async showBest(chatId: number): Promise<void> {
+    const hunt = await this.store.getHunt(chatId);
+    if (!hunt) return this.showHunt(chatId);
+    let trips: Trip[];
+    try {
+      trips = (await this.hunter.scan(hunt)).trips;
+    } catch (error) {
+      console.error('Hunt scan failed:', error);
+      return this.send(chatId, 'Не получилось загрузить цены 😕 Попробую при следующей проверке.', [[{ text: '🔥 Охотник', data: 'hunt' }]]);
+    }
+    // The cheapest way to each country's city, from whichever departure city.
+    const seen = new Set<string>();
+    const best = trips.filter((t) => !seen.has(t.city.code) && seen.add(t.city.code)).slice(0, 10);
+    if (best.length === 0) {
+      return this.send(
+        chatId,
+        'Пока билетов за границу не нашлось — данные появляются, когда их кто-то ищет. Продолжу проверять и напишу, когда что-то подешевеет.',
+        [[{ text: '🔥 Охотник', data: 'hunt' }]],
+      );
+    }
+    const lines = best.map((trip, i) => formatTrip(trip, this.currency, `${i + 1}. ${trip.origin.name} → ${trip.city.name}`));
+    await this.send(
+      chatId,
+      `🌍 <b>Самые дешёвые поездки сейчас</b> (туда-обратно на ${describeTripLength(hunt)}):\n\n${lines.join('\n\n')}\n\nЗапомнил эти цены. Напишу, когда что-то станет дешевле обычного на ${Math.round(DEAL_DROP * 100)}% и больше.`,
+      [[{ text: '🔥 Охотник', data: 'hunt' }]],
+    );
+  }
+
+  private async removeHuntOrigin(chatId: number, code: string): Promise<void> {
+    const hunt = await this.store.getHunt(chatId);
+    if (!hunt) return this.showHunt(chatId);
+    hunt.origins = hunt.origins.filter((o) => o.code !== code);
+    if (hunt.origins.length === 0) return this.stopHunt(chatId);
+    await this.store.saveHunt(hunt);
+    return this.showHunt(chatId);
+  }
+
+  private async stopHunt(chatId: number): Promise<void> {
+    await this.store.removeHunt(chatId);
+    await this.send(chatId, '⏹ Охотник выключен. Включить снова можно в любой момент.', [[{ text: MENU.hunt, data: 'hunt' }]]);
+  }
+
+  private async askTripLength(chatId: number): Promise<void> {
+    const buttons = TRIP_LENGTHS.map((t) => ({ text: t.label, data: `hlenset:${t.minDays}-${t.maxDays}` }));
+    await this.send(chatId, '📅 <b>На сколько дней летим?</b>', [...rows(buttons, 2), [CANCEL]]);
+  }
+
+  private async setTripLength(chatId: number, value: string): Promise<void> {
+    const trip = TRIP_LENGTHS.find((t) => `${t.minDays}-${t.maxDays}` === value);
+    const hunt = await this.store.getHunt(chatId);
+    if (!trip || !hunt) return this.showHunt(chatId);
+    await this.store.saveHunt({ ...hunt, minDays: trip.minDays, maxDays: trip.maxDays });
+    // Usual prices of other trip lengths do not compare.
+    await this.store.clearHuntPrices(chatId);
+    await this.send(chatId, `✅ Сохранил: поездка на ${describeTripLength(trip)}`);
+    await this.showBest(chatId);
   }
 
   // ---- editing ----
@@ -532,6 +647,21 @@ export class Conversation {
     if (action === 'cancel') return this.cancel(chatId);
     if (action === 'new') return this.startDraft(chatId);
     if (action === 'explore') return this.advance(chatId, { explore: true });
+    if (action === 'hunt') return this.showHunt(chatId);
+    if (action === 'hadd') return this.advance(chatId, { hunt: true });
+    if (action === 'hbest') return this.showBest(chatId);
+    if (action === 'hdel') return this.removeHuntOrigin(chatId, value);
+    if (action === 'hoff') return this.stopHunt(chatId);
+    if (action === 'hlen') return this.askTripLength(chatId);
+    if (action === 'hlenset') return this.setTripLength(chatId, value);
+    if (action === 'hcity') {
+      const city = POPULAR_ORIGINS.find((o) => o.code === value);
+      if (city) return this.addHuntOrigin(chatId, city);
+    }
+    if (action === 'hfrom') {
+      const city = (await this.hunter.cities([value])).get(value);
+      if (city?.countryCode) return this.addHuntOrigin(chatId, city);
+    }
     if (action === 'follow') return this.follow(chatId, value);
     if (action === 'del') return this.remove(chatId, Number(value));
     if (action === 'edit') return this.showEditMenu(chatId, Number(value));
@@ -567,7 +697,10 @@ export class Conversation {
   private async list(chatId: number): Promise<void> {
     const watches = await this.store.listWatches(chatId);
     if (watches.length === 0) {
-      return this.send(chatId, 'Пока ничего не отслеживаю.', [[{ text: MENU.track, data: 'new' }]]);
+      return this.send(chatId, 'Пока ни за одним маршрутом не слежу.', [
+        [{ text: MENU.hunt, data: 'hunt' }],
+        [{ text: MENU.track, data: 'new' }],
+      ]);
     }
     const lines = await Promise.all(
       watches.map(async (watch, i) => {
@@ -601,7 +734,11 @@ export class Conversation {
   private async checkNow(chatId: number): Promise<void> {
     const watches = await this.store.listWatches(chatId);
     if (watches.length === 0) {
-      return this.send(chatId, 'Пока ничего не отслеживаю.', [[{ text: MENU.track, data: 'new' }]]);
+      if (await this.store.getHunt(chatId)) return this.showBest(chatId);
+      return this.send(chatId, 'Пока ничего не отслеживаю.', [
+        [{ text: MENU.hunt, data: 'hunt' }],
+        [{ text: MENU.track, data: 'new' }],
+      ]);
     }
     let failed = 0;
     let found = 0;

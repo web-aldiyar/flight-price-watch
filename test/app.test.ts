@@ -96,7 +96,7 @@ describe('HTTP handler', () => {
     const response = await handle(
       new Request(`${BASE}/api/check`, { method: 'POST', headers: { authorization: `Bearer ${SECRET}` } }),
     );
-    expect(await response.json()).toEqual({ checked: 1, failed: 0 });
+    expect(await response.json()).toEqual({ checked: 1, failed: 0, hunts: { scanned: 0, failed: 0 } });
     expect(telegram.calls.at(-1)?.body['text']).toContain('Подешевело');
   });
 
