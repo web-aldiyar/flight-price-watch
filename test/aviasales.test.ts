@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createAviasalesSource, createExploreSource } from '../src/aviasales.ts';
+import { createAviasalesSource, createExploreSource, tripDays } from '../src/aviasales.ts';
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -63,30 +63,41 @@ describe('createAviasalesSource', () => {
     await expect(source({ origin: 'MOW', destination: 'LED', departDate: '2026-11', returnDate: null })).rejects.toThrow('401');
   });
 
-  it('finds the cheapest ticket per destination for "anywhere"', async () => {
+  it('finds the cheapest round trip of the right length per destination for "anywhere"', async () => {
     let url = '';
-    const ticket = (destination: string, price: number) => ({
+    const ticket = (destination: string, price: number, returnDay: number) => ({
       destination,
       price,
       airline: 'KC',
-      departure_at: '2026-11-12T08:00:00+05:00',
+      departure_at: '2026-11-12T23:00:00+05:00',
+      return_at: `2026-11-${returnDay}T01:00:00+03:00`,
       transfers: 0,
       link: `/search/ALA1211${destination}1`,
     });
     const fetchFn = (async (input: string) => {
       url = input;
-      return jsonResponse({ success: true, data: [ticket('NQZ', 15000), ticket('NQZ', 16000), ticket('IST', 42000)] });
+      return jsonResponse({
+        success: true,
+        data: [
+          ticket('NQZ', 15000, 13), // 1 day: too short
+          ticket('NQZ', 16000, 19),
+          ticket('NQZ', 17000, 20), // same destination again
+          ticket('IST', 42000, 26),
+          ticket('DXB', 43000, 30), // 18 days: too long
+        ],
+      });
     }) as typeof fetch;
 
-    const offers = await createExploreSource('t', 'kzt', fetchFn)('ALA');
+    const offers = await createExploreSource('t', 'kzt', fetchFn)('ALA', { minDays: 3, maxDays: 14 });
 
     const params = new URL(url).searchParams;
     expect(params.get('origin')).toBe('ALA');
+    expect(params.get('one_way')).toBe('false');
     expect(params.has('destination')).toBe(false);
     expect(params.has('departure_at')).toBe(false);
-    expect(offers.map((o) => [o.destination, o.price])).toEqual([
-      ['NQZ', 15000],
-      ['IST', 42000],
+    expect(offers.map((o) => [o.destination, o.price, tripDays(o)])).toEqual([
+      ['NQZ', 16000, 7],
+      ['IST', 42000, 14],
     ]);
     expect(offers[0]?.link).toBe('https://www.aviasales.ru/search/ALA1211NQZ1');
   });

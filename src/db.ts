@@ -17,6 +17,30 @@ export interface Watch {
   createdAt: string;
 }
 
+export interface Hunt {
+  chatId: number;
+  minDays: number;
+  maxDays: number;
+}
+
+export interface HuntPrice {
+  destination: string;
+  /** Slow moving average of the prices seen. */
+  usualPrice: number;
+  /** Price of the deal already reported; null when there is no ongoing deal. */
+  dealPrice: number | null;
+  /** Epoch milliseconds. */
+  updatedAt: number;
+}
+
+export interface City {
+  code: string;
+  name: string;
+  country: string;
+  /** Empty when the code is not a known city. */
+  countryCode: string;
+}
+
 export type NewWatch = Pick<
   Watch,
   'chatId' | 'origin' | 'destination' | 'originName' | 'destinationName' | 'departDate' | 'returnDate' | 'maxPrice'
@@ -52,11 +76,40 @@ const SCHEMA = [
     draft      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`,
+  // "Ticket hunter": one per chat, scans every destination abroad from the home city.
+  `CREATE TABLE IF NOT EXISTS hunts (
+    chat_id    BIGINT PRIMARY KEY,
+    min_days   INTEGER NOT NULL,
+    max_days   INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+  // What a destination usually costs for a hunt, to tell a real drop from the usual price.
+  `CREATE TABLE IF NOT EXISTS hunt_prices (
+    chat_id     BIGINT NOT NULL,
+    destination TEXT NOT NULL,
+    usual_price INTEGER NOT NULL,
+    deal_price  INTEGER,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, destination)
+  )`,
+  // City names and countries by IATA code, so scans do not look up the same cities again.
+  `CREATE TABLE IF NOT EXISTS cities (
+    code         TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    country      TEXT NOT NULL,
+    country_code TEXT NOT NULL
+  )`,
 ];
 
 // Casts keep row values driver-independent (BIGINT and timestamps come back as strings or objects otherwise).
 const COLUMNS = `id, chat_id::float8 AS chat_id, origin, destination, origin_name, destination_name, depart_date, return_date,
   max_price, last_price, created_at::text AS created_at`;
+
+const toHunt = (row: Record<string, unknown>): Hunt => ({
+  chatId: Number(row['chat_id']),
+  minDays: Number(row['min_days']),
+  maxDays: Number(row['max_days']),
+});
 
 const toWatch = (row: Record<string, unknown>): Watch => ({
   id: Number(row['id']),
@@ -181,5 +234,88 @@ export class Store {
 
   async clearDraft(chatId: number): Promise<void> {
     await this.sql('DELETE FROM chat_drafts WHERE chat_id = $1', [chatId]);
+  }
+
+  async getHunt(chatId: number): Promise<Hunt | null> {
+    const [row] = await this.sql(
+      'SELECT chat_id::float8 AS chat_id, min_days, max_days FROM hunts WHERE chat_id = $1',
+      [chatId],
+    );
+    return row ? toHunt(row) : null;
+  }
+
+  async listHunts(): Promise<Hunt[]> {
+    const rows = await this.sql('SELECT chat_id::float8 AS chat_id, min_days, max_days FROM hunts ORDER BY created_at');
+    return rows.map(toHunt);
+  }
+
+  async saveHunt(hunt: Hunt): Promise<void> {
+    await this.sql(
+      `INSERT INTO hunts (chat_id, min_days, max_days) VALUES ($1, $2, $3)
+       ON CONFLICT (chat_id) DO UPDATE SET min_days = EXCLUDED.min_days, max_days = EXCLUDED.max_days`,
+      [hunt.chatId, hunt.minDays, hunt.maxDays],
+    );
+  }
+
+  async removeHunt(chatId: number): Promise<void> {
+    await this.sql('DELETE FROM hunts WHERE chat_id = $1', [chatId]);
+    await this.clearHuntPrices(chatId);
+  }
+
+  /** Forgets the usual prices, e.g. when the trip length changes and old prices no longer compare. */
+  async clearHuntPrices(chatId: number): Promise<void> {
+    await this.sql('DELETE FROM hunt_prices WHERE chat_id = $1', [chatId]);
+  }
+
+  async huntPrices(chatId: number): Promise<HuntPrice[]> {
+    const rows = await this.sql(
+      `SELECT destination, usual_price, deal_price, extract(epoch FROM updated_at)::float8 * 1000 AS updated_at FROM hunt_prices WHERE chat_id = $1`,
+      [chatId],
+    );
+    return rows.map((row) => ({
+      destination: String(row['destination']),
+      usualPrice: Number(row['usual_price']),
+      dealPrice: row['deal_price'] == null ? null : Number(row['deal_price']),
+      updatedAt: Number(row['updated_at']),
+    }));
+  }
+
+  async saveHuntPrices(chatId: number, prices: Omit<HuntPrice, 'updatedAt'>[]): Promise<void> {
+    if (prices.length === 0) return;
+    await this.sql(
+      `INSERT INTO hunt_prices (chat_id, destination, usual_price, deal_price)
+       SELECT $1, p.destination, p.usual_price, p.deal_price
+       FROM jsonb_to_recordset($2::jsonb) AS p(destination TEXT, usual_price INTEGER, deal_price INTEGER)
+       ON CONFLICT (chat_id, destination) DO UPDATE
+       SET usual_price = EXCLUDED.usual_price, deal_price = EXCLUDED.deal_price, updated_at = now()`,
+      [
+        chatId,
+        JSON.stringify(
+          prices.map((p) => ({ destination: p.destination, usual_price: p.usualPrice, deal_price: p.dealPrice })),
+        ),
+      ],
+    );
+  }
+
+  async getCities(codes: string[]): Promise<City[]> {
+    if (codes.length === 0) return [];
+    const rows = await this.sql('SELECT code, name, country, country_code FROM cities WHERE code = ANY($1::text[])', [codes]);
+    return rows.map((row) => ({
+      code: String(row['code']),
+      name: String(row['name']),
+      country: String(row['country']),
+      countryCode: String(row['country_code']),
+    }));
+  }
+
+  async saveCities(cities: City[]): Promise<void> {
+    if (cities.length === 0) return;
+    await this.sql(
+      `INSERT INTO cities (code, name, country, country_code)
+       SELECT c.code, c.name, c.country, c.country_code
+       FROM jsonb_to_recordset($1::jsonb) AS c(code TEXT, name TEXT, country TEXT, country_code TEXT)
+       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, country = EXCLUDED.country, country_code = EXCLUDED.country_code`,
+      [JSON.stringify(cities.map((c) => ({ code: c.code, name: c.name, country: c.country, country_code: c.countryCode })))],
+    );
   }
 }

@@ -4,12 +4,14 @@ import { PriceChecker } from './checker.ts';
 import { BOT_COMMANDS, Conversation } from './commands.ts';
 import type { Config } from './config.ts';
 import { Store, type Query } from './db.ts';
+import { Hunter } from './hunter.ts';
 import { createPlaceSearch, type PlaceSearch } from './places.ts';
 import { parseUpdate, TelegramBot, type Incoming, type Update } from './telegram.ts';
 
 export interface App {
   bot: TelegramBot;
   checker: PriceChecker;
+  hunter: Hunter;
   handleUpdate(update: Incoming): Promise<void>;
 }
 
@@ -20,6 +22,7 @@ export interface AppDeps {
   placeSearch?: PlaceSearch;
   exploreSource?: ExploreSource;
   today?: () => string;
+  now?: () => number;
 }
 
 export function createApp(config: Config, deps: AppDeps): App {
@@ -29,11 +32,13 @@ export function createApp(config: Config, deps: AppDeps): App {
   const places = deps.placeSearch ?? createPlaceSearch(deps.fetchFn);
   const checker = new PriceChecker(store, source, bot, config.currency);
   const explore = deps.exploreSource ?? createExploreSource(config.travelpayoutsToken, config.currency, deps.fetchFn);
-  const conversation = new Conversation(store, checker, bot, places, explore, config.currency, deps.today);
+  const hunter = new Hunter(store, explore, places, bot, config.currency, deps.now);
+  const conversation = new Conversation(store, checker, hunter, bot, places, config.currency, deps.today);
 
   return {
     bot,
     checker,
+    hunter,
     async handleUpdate(update) {
       try {
         if (update.kind === 'button') {
@@ -70,7 +75,7 @@ const text = (body: string, status = 200) =>
 /**
  * HTTP API for serverless hosting:
  * - POST /api/telegram  Telegram webhook (checked via the secret token header)
- * - POST /api/check     check all prices; called on a schedule (Bearer CRON_SECRET)
+ * - POST /api/check     check all watches and hunts; called on a schedule (Bearer CRON_SECRET)
  * - GET  /api/setup     register the webhook and bot commands (Bearer CRON_SECRET or ?key=)
  */
 export function createHttpHandler(app: App, cronSecret: string): (request: Request) => Promise<Response> {
@@ -97,7 +102,8 @@ export function createHttpHandler(app: App, cronSecret: string): (request: Reque
       }
       case '/api/check': {
         if (!authorized(request)) return text('Unauthorized', 401);
-        return Response.json(await app.checker.checkAll());
+        const watches = await app.checker.checkAll();
+        return Response.json({ ...watches, hunts: await app.hunter.scanAll() });
       }
       case '/api/setup': {
         if (!authorized(request)) return text('Unauthorized', 401);

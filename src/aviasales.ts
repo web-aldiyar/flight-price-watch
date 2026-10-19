@@ -81,23 +81,39 @@ export interface DestinationOffer extends Offer {
   destination: string;
 }
 
-/** Cheapest one-way tickets from a city to anywhere, on any upcoming date: one per destination, cheapest first. */
-export type ExploreSource = (origin: string) => Promise<DestinationOffer[]>;
+/** Length of a round trip, in nights between the outbound and return flights. */
+export interface TripLength {
+  minDays: number;
+  maxDays: number;
+}
+
+/** Days between the outbound and return departure dates (local dates, as printed on the ticket). */
+export const tripDays = (offer: Pick<Offer, 'departureAt' | 'returnAt'>): number =>
+  offer.returnAt
+    ? Math.round((Date.parse(offer.returnAt.slice(0, 10)) - Date.parse(offer.departureAt.slice(0, 10))) / 86_400_000)
+    : 0;
+
+/** Cheapest round trips from a city to anywhere, on any upcoming dates: one per destination, cheapest first. */
+export type ExploreSource = (origin: string, trip: TripLength) => Promise<DestinationOffer[]>;
 
 export function createExploreSource(token: string, currency: string, fetchFn: typeof fetch = fetch): ExploreSource {
-  return async (origin) => {
+  return async (origin, trip) => {
     const params = new URLSearchParams({
       origin,
-      one_way: 'true',
+      one_way: 'false',
       sorting: 'price',
       currency,
-      limit: '200',
+      limit: '1000',
     });
     const tickets = await fetchTickets(token, params, fetchFn);
     const seen = new Set<string>();
     return tickets
-      .filter((ticket) => ticket.destination && !seen.has(ticket.destination) && seen.add(ticket.destination))
-      .slice(0, 50)
-      .map((ticket) => ({ ...toOffer(ticket), destination: ticket.destination }));
+      .map((ticket) => ({ ...toOffer(ticket), destination: ticket.destination }))
+      .filter((offer) => {
+        if (!offer.destination || !offer.returnAt || seen.has(offer.destination)) return false;
+        const days = tripDays(offer);
+        return days >= trip.minDays && days <= trip.maxDays && seen.add(offer.destination);
+      })
+      .slice(0, 80);
   };
 }
