@@ -267,36 +267,32 @@ describe('Conversation', () => {
   });
 
   describe('anywhere', () => {
-    it('shows the cheapest round trips abroad on any date', async () => {
+    it('shows the cheapest round trips abroad from Astana on any date, without questions', async () => {
       await say(MENU.explore);
-      expect(messenger.last?.text).toContain('за границу');
 
-      await say('Алматы');
-      expect(explored).toEqual([{ origin: 'ALA', trip: { minDays: 3, maxDays: 14 } }]);
+      expect(explored).toEqual([{ origin: 'NQZ', trip: { minDays: 3, maxDays: 14 } }]);
       const text = messenger.last?.text ?? '';
-      expect(text).toContain('Самые дешёвые поездки за границу из города Алматы');
-      expect(text).not.toContain('Астана');
+      expect(text).toContain('Самые дешёвые поездки за границу из города Астана');
+      expect(text).not.toContain('Астана</b>, Казахстан');
       expect(text).toContain('<b>1. Стамбул</b>, Турция — <b>42\u00a0000 ₸</b>');
       expect(text).toContain('20 декабря 2026 → 27 декабря 2026 · 7 дн. · пересадок: 1');
       expect(text).toContain('<b>2. Дубай</b>, ОАЭ — <b>60\u00a0000 ₸</b>\n     15 января 2027');
       expect(messenger.buttons).toEqual([
-        'follow:ALA.IST.2026-12-20.2026-12-27',
-        'follow:ALA.DXB.2027-01-15.2027-01-22',
-        'hfrom:ALA',
+        'follow:NQZ.IST.2026-12-20.2026-12-27',
+        'follow:NQZ.DXB.2027-01-15.2027-01-22',
+        'hon',
       ]);
-      expect(await store.getDraft(CHAT)).toBeNull();
     });
 
     it('starts watching the dates of the trip found', async () => {
       setup([60000]);
       await say(MENU.explore);
-      await say('Алматы');
-      await press('follow:ALA.DXB.2027-01-15.2027-01-22');
+      await press('follow:NQZ.DXB.2027-01-15.2027-01-22');
 
       expect((await store.listWatches(CHAT))[0]).toMatchObject({
-        origin: 'ALA',
+        origin: 'NQZ',
         destination: 'DXB',
-        originName: 'Алматы',
+        originName: 'Астана',
         destinationName: 'Дубай',
         departDate: '2027-01-15',
         returnDate: '2027-01-22',
@@ -312,61 +308,36 @@ describe('Conversation', () => {
     });
 
     it('says so when there is nothing abroad', async () => {
-      destinations = [trip('NQZ', 15000)];
+      destinations = [trip('ALA', 15000)];
       await say('/anywhere');
-      await say('Алматы');
       expect(messenger.last?.text).toContain('за границу пока не нашлось');
-    });
-
-    it('turns the city into a hunt', async () => {
-      await say(MENU.explore);
-      await say('Алматы');
-      await press('hfrom:ALA');
-      expect(await store.getHunt(CHAT)).toMatchObject({ origins: [{ code: 'ALA', name: 'Алматы', countryCode: 'KZ' }] });
     });
   });
 
-  describe('ticket hunter', () => {
+  describe('hot tickets', () => {
     const hourLater = () => (now += 3_600_000);
 
-    it('asks for a departure city, offering big cities', async () => {
+    it('turns on with one button and shows what is cheap now', async () => {
+      destinations = [trip('ALA', 20000), trip('IST', 42000), trip('ROM', 90000)];
       await say(MENU.hunt);
-      expect(messenger.last?.text).toContain('Откуда можете вылететь');
-      expect(messenger.buttons).toEqual(['hcity:MOW', 'hcity:TLV', 'hcity:LON', 'hcity:MAD', 'hcity:ROM', 'cancel']);
-    });
 
-    it('hunts from the chosen cities and shows what is cheap now', async () => {
-      destinations = [trip('MOW', 20000), trip('IST', 42000), trip('ROM', 90000)];
-      await say('/hunt');
-      await press('hcity:MOW');
-
-      expect(await store.getHunt(CHAT)).toEqual({
-        chatId: CHAT,
-        origins: [{ code: 'MOW', name: 'Москва', countryCode: 'RU' }],
-        minDays: 3,
-        maxDays: 14,
-      });
-      expect(texts().at(-2)).toContain('Добавил: Москва');
+      expect(await store.getHunt(CHAT)).toEqual({ chatId: CHAT, minDays: 3, maxDays: 14 });
+      expect(explored.at(-1)?.origin).toBe('NQZ');
+      expect(texts().at(-2)).toContain('Включил охоту за горящими билетами');
       const text = messenger.last?.text ?? '';
-      expect(text).toContain('<b>1. Москва → Стамбул</b>, Турция — <b>42\u00a0000 ₸</b>');
-      expect(text).toContain('<b>2. Москва → Рим</b>');
-      expect(text).not.toContain('Москва → Москва');
+      expect(text).toContain('<b>1. Стамбул</b>, Турция — <b>42\u00a0000 ₸</b>');
+      expect(text).toContain('<b>2. Рим</b>');
+      expect(text).not.toContain('Алматы');
 
-      // A city typed by name is added too, and both are scanned.
-      await say(MENU.hunt);
-      expect(messenger.last?.text).toContain('Вылет из: Москва');
-      await press('hadd');
-      await say('Алматы');
-      expect((await store.getHunt(CHAT))?.origins.map((o) => o.code)).toEqual(['MOW', 'ALA']);
-      expect(explored.slice(-2).map((e) => e.origin)).toEqual(['MOW', 'ALA']);
-      // Istanbul is cheapest from either city; Moscow is abroad from Almaty.
-      expect(messenger.last?.text).toContain('Алматы → Москва');
+      await say('/hunt');
+      expect(messenger.last?.text).toContain('Ловлю горящие билеты');
+      expect(messenger.buttons).toEqual(['hbest', 'hlen', 'hoff']);
     });
 
-    it('alerts once when a destination gets much cheaper than usual', async () => {
+    it('alerts once when a destination suddenly gets much cheaper than usual', async () => {
       destinations = [trip('IST', 100000), trip('ROM', 200000)];
-      await press('hcity:MOW');
-      expect(texts().some((t) => t.includes('Выгодные'))).toBe(false);
+      await say(MENU.hunt);
+      expect(texts().some((t) => t.includes('Горящие'))).toBe(false);
       const scan = async () => {
         hourLater();
         const before = messenger.sent.length;
@@ -376,21 +347,21 @@ describe('Conversation', () => {
 
       destinations = [trip('IST', 90000), trip('ROM', 150000)];
       let sent = await scan();
-      expect(sent[0]).toContain('Выгодные билеты');
-      expect(sent[0]).toContain('Москва → Рим');
+      expect(sent[0]).toContain('Горящие билеты из города Астана');
+      expect(sent[0]).toContain('<b>Рим</b>, Италия');
       expect(sent[0]).toContain('обычно ~200\u00a0000 ₸, <b>−25%</b>');
       expect(sent[0]).not.toContain('Стамбул'); // only 10% cheaper
 
       // The same deal is not reported again; a deeper drop is.
       sent = await scan();
-      expect(sent.some((t) => t.includes('Выгодные'))).toBe(false);
+      expect(sent.some((t) => t.includes('Горящие'))).toBe(false);
       destinations = [trip('IST', 90000), trip('ROM', 140000)];
       sent = await scan();
       expect(sent[0]).toContain('140\u00a0000 ₸');
     });
 
     it('changes the trip length and forgets the old usual prices', async () => {
-      await press('hcity:MOW');
+      await say(MENU.hunt);
       await press('hlen');
       expect(messenger.buttons).toEqual(['hlenset:3-14', 'hlenset:2-4', 'hlenset:5-9', 'hlenset:10-16', 'cancel']);
       await press('hlenset:2-4');
@@ -398,19 +369,11 @@ describe('Conversation', () => {
       expect(explored.at(-1)?.trip).toEqual({ minDays: 2, maxDays: 4 });
     });
 
-    it('removes cities and turns off with the last one', async () => {
-      await press('hcity:MOW');
-      await press('hcity:TLV');
-      await press('hcity:MOW');
-      expect(texts()).toContain('Москва уже в списке.');
-
-      await press('hdel:MOW');
-      expect((await store.getHunt(CHAT))?.origins.map((o) => o.code)).toEqual(['TLV']);
-      expect(messenger.last?.text).toContain('Вылет из: Тель-Авив');
-
-      await press('hdel:TLV');
+    it('turns off', async () => {
+      await say(MENU.hunt);
+      await press('hoff');
       expect(await store.getHunt(CHAT)).toBeNull();
-      expect(messenger.last?.text).toContain('Охотник выключен');
+      expect(messenger.last?.text).toContain('выключен');
     });
   });
 });

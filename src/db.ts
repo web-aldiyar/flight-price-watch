@@ -17,22 +17,13 @@ export interface Watch {
   createdAt: string;
 }
 
-/** A departure city of a hunt. */
-export interface HuntOrigin {
-  code: string;
-  name: string;
-  countryCode: string;
-}
-
 export interface Hunt {
   chatId: number;
-  origins: HuntOrigin[];
   minDays: number;
   maxDays: number;
 }
 
 export interface HuntPrice {
-  origin: string;
   destination: string;
   /** Slow moving average of the prices seen. */
   usualPrice: number;
@@ -85,10 +76,9 @@ const SCHEMA = [
     draft      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`,
-  // "Ticket hunter": one per chat, scans every destination abroad from the chosen cities.
+  // "Ticket hunter": one per chat, scans every destination abroad from the home city.
   `CREATE TABLE IF NOT EXISTS hunts (
     chat_id    BIGINT PRIMARY KEY,
-    origins    JSONB NOT NULL,
     min_days   INTEGER NOT NULL,
     max_days   INTEGER NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -96,12 +86,11 @@ const SCHEMA = [
   // What a destination usually costs for a hunt, to tell a real drop from the usual price.
   `CREATE TABLE IF NOT EXISTS hunt_prices (
     chat_id     BIGINT NOT NULL,
-    origin      TEXT NOT NULL,
     destination TEXT NOT NULL,
     usual_price INTEGER NOT NULL,
     deal_price  INTEGER,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (chat_id, origin, destination)
+    PRIMARY KEY (chat_id, destination)
   )`,
   // City names and countries by IATA code, so scans do not look up the same cities again.
   `CREATE TABLE IF NOT EXISTS cities (
@@ -118,7 +107,6 @@ const COLUMNS = `id, chat_id::float8 AS chat_id, origin, destination, origin_nam
 
 const toHunt = (row: Record<string, unknown>): Hunt => ({
   chatId: Number(row['chat_id']),
-  origins: JSON.parse(String(row['origins'])) as HuntOrigin[],
   minDays: Number(row['min_days']),
   maxDays: Number(row['max_days']),
 });
@@ -250,27 +238,22 @@ export class Store {
 
   async getHunt(chatId: number): Promise<Hunt | null> {
     const [row] = await this.sql(
-      'SELECT chat_id::float8 AS chat_id, origins::text AS origins, min_days, max_days FROM hunts WHERE chat_id = $1',
+      'SELECT chat_id::float8 AS chat_id, min_days, max_days FROM hunts WHERE chat_id = $1',
       [chatId],
     );
     return row ? toHunt(row) : null;
   }
 
   async listHunts(): Promise<Hunt[]> {
-    const rows = await this.sql('SELECT chat_id::float8 AS chat_id, origins::text AS origins, min_days, max_days FROM hunts ORDER BY created_at');
+    const rows = await this.sql('SELECT chat_id::float8 AS chat_id, min_days, max_days FROM hunts ORDER BY created_at');
     return rows.map(toHunt);
   }
 
   async saveHunt(hunt: Hunt): Promise<void> {
     await this.sql(
-      `INSERT INTO hunts (chat_id, origins, min_days, max_days) VALUES ($1, $2::jsonb, $3, $4)
-       ON CONFLICT (chat_id) DO UPDATE SET origins = EXCLUDED.origins, min_days = EXCLUDED.min_days, max_days = EXCLUDED.max_days`,
-      [hunt.chatId, JSON.stringify(hunt.origins), hunt.minDays, hunt.maxDays],
-    );
-    // Prices of cities no longer hunted from are stale.
-    await this.sql(
-      `DELETE FROM hunt_prices WHERE chat_id = $1 AND NOT (origin = ANY($2::text[]))`,
-      [hunt.chatId, hunt.origins.map((o) => o.code)],
+      `INSERT INTO hunts (chat_id, min_days, max_days) VALUES ($1, $2, $3)
+       ON CONFLICT (chat_id) DO UPDATE SET min_days = EXCLUDED.min_days, max_days = EXCLUDED.max_days`,
+      [hunt.chatId, hunt.minDays, hunt.maxDays],
     );
   }
 
@@ -286,11 +269,10 @@ export class Store {
 
   async huntPrices(chatId: number): Promise<HuntPrice[]> {
     const rows = await this.sql(
-      `SELECT origin, destination, usual_price, deal_price, extract(epoch FROM updated_at)::float8 * 1000 AS updated_at FROM hunt_prices WHERE chat_id = $1`,
+      `SELECT destination, usual_price, deal_price, extract(epoch FROM updated_at)::float8 * 1000 AS updated_at FROM hunt_prices WHERE chat_id = $1`,
       [chatId],
     );
     return rows.map((row) => ({
-      origin: String(row['origin']),
       destination: String(row['destination']),
       usualPrice: Number(row['usual_price']),
       dealPrice: row['deal_price'] == null ? null : Number(row['deal_price']),
@@ -301,15 +283,15 @@ export class Store {
   async saveHuntPrices(chatId: number, prices: Omit<HuntPrice, 'updatedAt'>[]): Promise<void> {
     if (prices.length === 0) return;
     await this.sql(
-      `INSERT INTO hunt_prices (chat_id, origin, destination, usual_price, deal_price)
-       SELECT $1, p.origin, p.destination, p.usual_price, p.deal_price
-       FROM jsonb_to_recordset($2::jsonb) AS p(origin TEXT, destination TEXT, usual_price INTEGER, deal_price INTEGER)
-       ON CONFLICT (chat_id, origin, destination) DO UPDATE
+      `INSERT INTO hunt_prices (chat_id, destination, usual_price, deal_price)
+       SELECT $1, p.destination, p.usual_price, p.deal_price
+       FROM jsonb_to_recordset($2::jsonb) AS p(destination TEXT, usual_price INTEGER, deal_price INTEGER)
+       ON CONFLICT (chat_id, destination) DO UPDATE
        SET usual_price = EXCLUDED.usual_price, deal_price = EXCLUDED.deal_price, updated_at = now()`,
       [
         chatId,
         JSON.stringify(
-          prices.map((p) => ({ origin: p.origin, destination: p.destination, usual_price: p.usualPrice, deal_price: p.dealPrice })),
+          prices.map((p) => ({ destination: p.destination, usual_price: p.usualPrice, deal_price: p.dealPrice })),
         ),
       ],
     );

@@ -1,6 +1,6 @@
 import { tripDays, type DestinationOffer, type ExploreSource, type TripLength } from './aviasales.ts';
 import { formatDate } from './dates.ts';
-import type { City, Hunt, HuntOrigin, HuntPrice, Store } from './db.ts';
+import type { City, Hunt, HuntPrice, Store } from './db.ts';
 import { formatPrice } from './format.ts';
 import type { PlaceSearch } from './places.ts';
 import type { Messenger } from './telegram.ts';
@@ -9,7 +9,15 @@ import type { Messenger } from './telegram.ts';
 export const DEAL_DROP = 0.2;
 /** The usual price follows the prices seen over about a week. */
 const USUAL_PRICE_HOURS = 7 * 24;
-export const MAX_ORIGINS = 6;
+
+export interface HomeCity {
+  code: string;
+  name: string;
+  countryCode: string;
+}
+
+/** Every trip starts here. */
+export const HOME: HomeCity = { code: 'NQZ', name: 'Астана', countryCode: 'KZ' };
 
 export const TRIP_LENGTHS: (TripLength & { label: string })[] = [
   { minDays: 3, maxDays: 14, label: '3–14 дней' },
@@ -19,19 +27,9 @@ export const TRIP_LENGTHS: (TripLength & { label: string })[] = [
 ];
 export const DEFAULT_TRIP: TripLength = TRIP_LENGTHS[0]!;
 
-/** Big cities where tickets are usually expensive, offered as buttons. */
-export const POPULAR_ORIGINS: HuntOrigin[] = [
-  { code: 'MOW', name: 'Москва', countryCode: 'RU' },
-  { code: 'TLV', name: 'Тель-Авив', countryCode: 'IL' },
-  { code: 'LON', name: 'Лондон', countryCode: 'GB' },
-  { code: 'MAD', name: 'Мадрид', countryCode: 'ES' },
-  { code: 'ROM', name: 'Рим', countryCode: 'IT' },
-];
-
 export const describeTripLength = (trip: TripLength): string => `${trip.minDays}–${trip.maxDays} дн.`;
 
 export interface Trip {
-  origin: HuntOrigin;
   city: City;
   offer: DestinationOffer;
 }
@@ -61,8 +59,8 @@ export function judgePrice(
   };
 }
 
-/** "<b>Москва → Рим</b>, Италия — 85 000 ₸" and the dates, transfers and link below. */
-export function formatTrip({ origin, city, offer }: Trip, currency: string, title = `${origin.name} → ${city.name}`): string {
+/** "<b>Рим</b>, Италия — 85 000 ₸" and the dates, transfers and link below. */
+export function formatTrip({ city, offer }: Trip, currency: string, title = city.name): string {
   const transfers = offer.transfers === 0 ? 'прямой' : `пересадок: ${offer.transfers}`;
   const dates = `${formatDate(offer.departureAt.slice(0, 10))} → ${formatDate(offer.returnAt!.slice(0, 10))}`;
   return (
@@ -76,12 +74,12 @@ export function buildDealAlert(deals: Deal[], currency: string): string {
     const drop = Math.round((1 - deal.offer.price / deal.usualPrice) * 100);
     return `${formatTrip(deal, currency)}\n     обычно ~${formatPrice(deal.usualPrice, currency)}, <b>−${drop}%</b>`;
   });
-  return `🔥 <b>Выгодные билеты!</b> Туда-обратно, дешевле обычного:\n\n${lines.join('\n\n')}`;
+  return `🔥 <b>Горящие билеты из города ${HOME.name}!</b> Туда-обратно, дешевле обычного:\n\n${lines.join('\n\n')}`;
 }
 
 /**
- * "Ticket hunter": watches every destination abroad from the chosen cities, on any dates,
- * and reports round trips that became much cheaper than usual.
+ * "Ticket hunter": watches every destination abroad from the home city, on any dates,
+ * and reports round trips that suddenly became much cheaper than usual.
  */
 export class Hunter {
   private readonly store: Store;
@@ -90,6 +88,7 @@ export class Hunter {
   private readonly messenger: Messenger;
   private readonly currency: string;
   private readonly now: () => number;
+  readonly home: HomeCity;
 
   constructor(
     store: Store,
@@ -98,7 +97,9 @@ export class Hunter {
     messenger: Messenger,
     currency: string,
     now: () => number = Date.now,
+    home: HomeCity = HOME,
   ) {
+    this.home = home;
     this.store = store;
     this.explore = explore;
     this.places = places;
@@ -135,40 +136,32 @@ export class Hunter {
     return known;
   }
 
-  /** The cheapest round trips abroad from a city, one per destination, cheapest first. */
-  async trips(origin: HuntOrigin, trip: TripLength): Promise<Trip[]> {
+  /** The cheapest round trips abroad from the home city, one per destination, cheapest first. */
+  async trips(trip: TripLength): Promise<Trip[]> {
+    const origin = this.home;
     const offers = await this.explore(origin.code, { minDays: trip.minDays, maxDays: trip.maxDays });
     const cities = await this.cities(offers.map((offer) => offer.destination));
     return offers.flatMap((offer) => {
       const city = cities.get(offer.destination);
       // Unknown countries are skipped: we cannot tell whether they are abroad.
-      return city?.countryCode && city.countryCode !== origin.countryCode ? [{ origin, city, offer }] : [];
+      return city?.countryCode && city.countryCode !== origin.countryCode ? [{ city, offer }] : [];
     });
   }
 
   /**
-   * Looks at every city of a hunt, updates the usual prices and sends the deals found.
+   * Looks at every destination, updates the usual prices and sends the deals found.
    * Returns all trips found (cheapest first) and the deals among them.
    */
   async scan(hunt: Hunt): Promise<{ trips: Trip[]; deals: Deal[] }> {
-    const results = await Promise.allSettled(hunt.origins.map((origin) => this.trips(origin, hunt)));
-    const failures = results.filter((r) => r.status === 'rejected');
-    for (const failure of failures) console.error(`Hunt scan for chat ${hunt.chatId} failed:`, failure.reason);
-    if (failures.length > 0 && failures.length === results.length) throw failures[0]!.reason;
-
-    const trips = results
-      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []))
-      .sort((a, b) => a.offer.price - b.offer.price);
-    const previous = new Map(
-      (await this.store.huntPrices(hunt.chatId)).map((p) => [`${p.origin}.${p.destination}`, p]),
-    );
+    const trips = await this.trips(hunt);
+    const previous = new Map((await this.store.huntPrices(hunt.chatId)).map((p) => [p.destination, p]));
     const now = this.now();
     const deals: Deal[] = [];
     const updates = trips.map((trip) => {
-      const before = previous.get(`${trip.origin.code}.${trip.city.code}`);
+      const before = previous.get(trip.city.code);
       const judged = judgePrice(before, trip.offer.price, now);
       if (judged.isDeal) deals.push({ ...trip, usualPrice: before!.usualPrice });
-      return { origin: trip.origin.code, destination: trip.city.code, usualPrice: judged.usualPrice, dealPrice: judged.dealPrice };
+      return { destination: trip.city.code, usualPrice: judged.usualPrice, dealPrice: judged.dealPrice };
     });
     await this.store.saveHuntPrices(hunt.chatId, updates);
 
